@@ -1,7 +1,25 @@
-# Ignore service account key
-serviceAccountKey.json
-
-
-
-# Ignore environment variables
+# Environment variables (NEVER commit these!)
 .env
+.env.local
+.env.production
+
+# Service account keys
+serviceAccountKey.json
+*.pem
+*.json
+
+# Logs
+logs/
+*.log
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
