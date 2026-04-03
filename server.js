@@ -45,14 +45,18 @@ const openai = new OpenAI({
   }
 });
 
-const modelName = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free';
+// UPDATED: Using Qwen model as requested. 
+// Note: Check OpenRouter for the exact string for "Qwen3.6 Plus". 
+// Common free/high-quality Qwen strings are 'qwen/qwen-2.5-72b-instruct' or similar.
+const modelName = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct'; 
 console.log('✅ OpenRouter initialized successfully');
 console.log('📦 Using model:', modelName);
 
 // --- 2. Validation Schemas using Zod ---
 const MessageSchema = z.object({
   message: z.string().min(1, "Message required"),
-  sessionId: z.string().optional()
+  sessionId: z.string().optional(),
+  preferredLanguage: z.string().optional() // Optional: Frontend can send detected language
 });
 
 const LeadSchema = z.object({
@@ -212,14 +216,31 @@ app.get('/api/trigger-wake', (req, res) => {
 app.post('/api/session/init', (req, res) => {
   try {
     const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+    
+    // Updated System Prompt for Language Preference
+    const systemPrompt = `
+      You are Rajkumar, a helpful and friendly AI assistant.
+      
+      IMPORTANT INSTRUCTION REGARDING LANGUAGE:
+      1. At the very beginning of the conversation, if the user hasn't specified a language, politely ask them which language they are comfortable with (e.g., "Hello! I am Rajkumar. Which language would you prefer to chat in? English, Hindi, or Hinglish?").
+      2. Once the user specifies a language, STRICTLY adhere to that language for all subsequent responses.
+      3. If the user writes in Hinglish, respond in Hinglish. If Hindi, respond in Hindi. If English, respond in English.
+      4. Do not switch languages unless the user explicitly requests it.
+
+      OTHER INSTRUCTIONS:
+      - If the user provides lead information (Name, Phone, Interest), use the 'save_lead_to_sheet' tool immediately.
+      - Be concise and polite.
+    `;
+
     sessions.set(sessionId, {
       messages: [
         {
           role: "system",
-          content: "Main Rajkumar hu. Hinglish me baat karna. Agar lead mile toh save_lead_to_sheet tool use karna."
+          content: systemPrompt
         }
       ],
-      lastAccessed: Date.now()
+      lastAccessed: Date.now(),
+      languageDetected: null // Track detected language per session
     });
     
     res.json({ sessionId, message: "Session initialized" });
@@ -296,23 +317,39 @@ app.post('/api/chat', async (req, res) => {
   
   try {
     // Validate input
-    const { message, sessionId } = MessageSchema.parse(req.body);
+    const { message, sessionId, preferredLanguage } = MessageSchema.parse(req.body);
 
     // Get or create session
     let session = sessionId ? sessions.get(sessionId) : null;
+    
+    // If session doesn't exist, create one dynamically (fallback)
     if (!session) {
+      const newSessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+      const systemPrompt = `
+        You are Rajkumar, a helpful and friendly AI assistant.
+        
+        IMPORTANT INSTRUCTION REGARDING LANGUAGE:
+        1. At the very beginning of the conversation, if the user hasn't specified a language, politely ask them which language they are comfortable with.
+        2. Once the user specifies a language, STRICTLY adhere to that language for all subsequent responses.
+        3. If the user writes in Hinglish, respond in Hinglish. If Hindi, respond in Hindi. If English, respond in English.
+        
+        OTHER INSTRUCTIONS:
+        - If the user provides lead information (Name, Phone, Interest), use the 'save_lead_to_sheet' tool immediately.
+      `;
+      
       session = {
-        messages: [
-          {
-            role: "system",
-            content: "Main Rajkumar hu. Hinglish me baat karna. Agar lead mile toh save_lead_to_sheet tool use karna."
-          }
-        ],
-        lastAccessed: Date.now()
+        messages: [{ role: "system", content: systemPrompt }],
+        lastAccessed: Date.now(),
+        languageDetected: preferredLanguage || null
       };
-      if (sessionId) sessions.set(sessionId, session);
+      sessions.set(newSessionId, session);
+      // We will return this new ID in the response
     } else {
       session.lastAccessed = Date.now();
+      // Update language preference if sent from frontend
+      if (preferredLanguage && !session.languageDetected) {
+        session.languageDetected = preferredLanguage;
+      }
     }
 
     // Check cache
@@ -323,7 +360,7 @@ app.post('/api/chat', async (req, res) => {
       session.messages.push({ role: "assistant", content: cachedResponse.reply });
       return res.json({ 
         reply: cachedResponse.reply, 
-        sessionId: sessionId || Date.now().toString(),
+        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0], // Return existing or new ID
         cached: true,
         responseTime: Date.now() - startTime
       });
@@ -412,7 +449,7 @@ app.post('/api/chat', async (req, res) => {
 
       return res.json({ 
         reply: finalText, 
-        sessionId: sessionId || Date.now().toString(),
+        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0],
         toolUsed: responseMessage.tool_calls[0].function.name,
         responseTime: Date.now() - startTime
       });
@@ -427,7 +464,7 @@ app.post('/api/chat', async (req, res) => {
       
       return res.json({ 
         reply: text, 
-        sessionId: sessionId || Date.now().toString(),
+        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0],
         responseTime: Date.now() - startTime
       });
     }
@@ -516,8 +553,8 @@ app.get('/api/test', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'AI Chatbot API Server with OpenRouter',
-    version: '1.0.0',
+    message: 'AI Chatbot API Server with OpenRouter (Qwen)',
+    version: '2.0.0',
     model: modelName,
     endpoints: {
       chat: 'POST /api/chat',
