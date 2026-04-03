@@ -1,4 +1,11 @@
-import 'dotenv/config';
+/**
+ * 🤖 AI Chatbot Backend - Rajkumar's AI Agent
+ * Features: OpenRouter + Qwen Model + Google Sheets + Language Preference + Wake System
+ * Author: Rajkumar Chourasiya
+ * Language: Hinglish comments for easy understanding 😊
+ */
+
+import 'dotenv/config';  // ✅ Sabse pehle .env load karein
 import express from 'express';
 import cors from 'cors';
 import OpenAI from 'openai';
@@ -7,67 +14,86 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
 
+// __dirname fix for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// ===========================================
+// 🛡️ Middleware Setup
+// ===========================================
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Response caching
+// Request logger (debugging ke liye useful)
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.path} from ${req.ip}`);
+  next();
+});
+
+// ===========================================
+// 🗄️ Response Caching (5 minutes TTL)
+// ===========================================
 const responseCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// Environment variables for wake functionality
-const WAKE_TOKEN = process.env.WAKE_TOKEN || 'your-secret-token-here';
+// ===========================================
+// 🔐 Security Variables
+// ===========================================
+const WAKE_TOKEN = process.env.WAKE_TOKEN || 'change-me-in-env';
 const SELF_URL = process.env.SELF_URL || 'http://localhost:5000';
 
-// --- 1. OpenRouter Setup ---
+// ===========================================
+// 🤖 OpenRouter Setup (Qwen Model)
+// ===========================================
 if (!process.env.OPENROUTER_API_KEY) {
-  console.error('❌ ERROR: OPENROUTER_API_KEY is not set in .env file!');
+  console.error('❌ CRITICAL: OPENROUTER_API_KEY not set in .env!');
+  console.error('💡 Solution: Add your key from https://openrouter.ai/keys');
   process.exit(1);
 }
 
-// Initialize OpenRouter
 const openai = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1',
   apiKey: process.env.OPENROUTER_API_KEY,
   defaultHeaders: {
     'HTTP-Referer': process.env.APP_URL || 'http://localhost:5000',
-    'X-Title': process.env.APP_NAME || 'AI Chatbot',
+    'X-Title': process.env.APP_NAME || 'Rajkumar AI Chatbot',
   }
 });
 
-// UPDATED: Using Qwen model as requested. 
-// Note: Check OpenRouter for the exact string for "Qwen3.6 Plus". 
-// Common free/high-quality Qwen strings are 'qwen/qwen-2.5-72b-instruct' or similar.
-const modelName = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct'; 
-console.log('✅ OpenRouter initialized successfully');
-console.log('📦 Using model:', modelName);
+const modelName = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct';
+console.log('✅ OpenRouter initialized');
+console.log(`📦 Using model: ${modelName}`);
 
-// --- 2. Validation Schemas using Zod ---
+// ===========================================
+// 📝 Validation Schemas (Zod)
+// ===========================================
 const MessageSchema = z.object({
-  message: z.string().min(1, "Message required"),
+  message: z.string().min(1, "Message cannot be empty"),
   sessionId: z.string().optional(),
-  preferredLanguage: z.string().optional() // Optional: Frontend can send detected language
+  preferredLanguage: z.enum(['eng', 'hin', 'hin-eng']).optional().default('hin-eng')
 });
 
 const LeadSchema = z.object({
-  name: z.string().min(1),
-  phone: z.string().min(10),
+  name: z.string().min(1, "Name required"),
+  phone: z.string().min(10, "Valid phone required"),
   email: z.string().email().optional(),
-  message: z.string().min(1),
+  message: z.string().min(1, "Message required"),
   interest: z.string().optional()
 });
 
-// --- 3. Google Sheets Setup ---
+// ===========================================
+// 📊 Google Sheets Setup (Optional)
+// ===========================================
 const keyFilePath = path.resolve(__dirname, './serviceAccountKey.json');
 let sheets = null;
 let isSheetsReady = false;
@@ -81,76 +107,80 @@ try {
   isSheetsReady = true;
   console.log('✅ Google Sheets auth loaded');
 } catch (err) {
-  console.warn('⚠️ Google Sheets not configured:', err.message);
+  console.warn('⚠️ Google Sheets not configured (optional feature)');
+  console.warn('💡 To enable: Setup service account from Google Cloud Console');
 }
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const RANGE = 'Sheet1!A:F';
 
-// --- 4. Tool Definitions for Function Calling ---
+// ===========================================
+// 🛠️ Tool Definitions for Function Calling
+// ===========================================
 const tools = [
   {
     type: "function",
     function: {
       name: "get_current_time",
-      description: "Get the current date and time for a specific location.",
+      description: "Get current date/time for a location",
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string", description: "City name" },
-          format: { type: "string", description: "Time format (short/long)", enum: ["short", "long"] }
+          location: { type: "string", description: "City name, e.g., 'Indore'" },
+          format: { type: "string", enum: ["short", "long"], default: "long" }
         },
-        required: ["location"],
-      },
-    },
+        required: ["location"]
+      }
+    }
   },
   {
     type: "function",
     function: {
       name: "save_lead_to_sheet",
-      description: "Save a potential customer lead to Google Sheets. Use when user shares name, phone, or interest.",
+      description: "Save customer lead to Google Sheets. Use when user shares contact info.",
       parameters: {
         type: "object",
         properties: {
           name: { type: "string", description: "Customer name" },
-          phone: { type: "string", description: "Customer phone number" },
-          email: { type: "string", description: "Customer email (optional)" },
-          message: { type: "string", description: "Customer query or message" },
-          interest: { type: "string", description: "Product/service interest category" }
+          phone: { type: "string", description: "Phone number" },
+          email: { type: "string", description: "Email (optional)" },
+          message: { type: "string", description: "Customer query" },
+          interest: { type: "string", description: "Product interest" }
         },
-        required: ["name", "phone", "message"],
-      },
-    },
+        required: ["name", "phone", "message"]
+      }
+    }
   },
   {
     type: "function",
     function: {
       name: "calculate",
-      description: "Perform mathematical calculations",
+      description: "Perform math calculations",
       parameters: {
         type: "object",
         properties: {
-          expression: { type: "string", description: "Mathematical expression to evaluate" }
+          expression: { type: "string", description: "Math expression, e.g., '2+2'" }
         },
         required: ["expression"]
-      },
-    },
-  },
+      }
+    }
+  }
 ];
 
-// --- 5. Session Management ---
+// ===========================================
+// 👥 Session Management
+// ===========================================
 const sessions = new Map();
 const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
-
-// Track last activity for keep-alive
 let lastActivityTime = Date.now();
 
-// Cleanup old sessions
+// Cleanup old sessions every 5 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [sessionId, session] of sessions.entries()) {
     if (now - session.lastAccessed > SESSION_TIMEOUT) {
       sessions.delete(sessionId);
+      console.log(`🧹 Cleaned up session: ${sessionId}`);
     }
   }
 }, 5 * 60 * 1000);
@@ -161,96 +191,105 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- 6. Health & Wake Endpoints ---
+// ===========================================
+// 🏥 Health & Wake Endpoints
+// ===========================================
+
+// Health check - frontend uses this to detect server status
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Server is awake!', 
+  res.json({
+    status: 'ok',
+    message: 'Server is awake! 🚀',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    sessions: sessions.size,
-    memory: process.memoryUsage(),
+    activeSessions: sessions.size,
+    memoryUsage: process.memoryUsage(),
     sheetsReady: isSheetsReady,
     model: modelName,
     lastActivity: new Date(lastActivityTime).toISOString()
   });
 });
 
+// Simple wake endpoint (no auth - for Render auto-wake)
 app.get('/api/wake', (req, res) => {
-  console.log('🔔 Wake-up signal received at', new Date().toISOString());
-  res.json({ 
-    status: 'waking', 
+  console.log('🔔 Wake signal received');
+  res.json({
+    status: 'waking',
     message: 'Server is ready!',
     timestamp: new Date().toISOString()
   });
 });
 
-// Keep-alive endpoint (called by frontend periodically)
+// Keep-alive endpoint (called by frontend every 10 mins)
 app.post('/api/keep-alive', (req, res) => {
-  console.log('❤️ Keep-alive received at', new Date().toISOString());
-  res.json({ 
-    status: 'alive', 
-    timestamp: new Date().toISOString() 
+  console.log('❤️ Keep-alive received');
+  res.json({
+    status: 'alive',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Wake-up trigger with token verification (secure endpoint)
+// Secure wake trigger (with token verification)
 app.get('/api/trigger-wake', (req, res) => {
   const { token } = req.query;
   
-  // Simple token verification to prevent abuse
   if (token !== WAKE_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    console.warn('🔐 Unauthorized wake attempt from:', req.ip);
+    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
   }
   
-  console.log('🚀 Wake trigger received at', new Date().toISOString());
-  
-  res.json({ 
-    status: 'waking', 
+  console.log('🚀 Authorized wake trigger received');
+  res.json({
+    status: 'waking',
     message: 'Server wake sequence initiated',
     timestamp: new Date().toISOString()
   });
 });
 
-// --- 7. Session Init ---
+// ===========================================
+// 🎯 Session Initialization (POST)
+// ===========================================
 app.post('/api/session/init', (req, res) => {
   try {
-    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+    const { preferredLanguage = 'hin-eng' } = req.body;
     
-    // Updated System Prompt for Language Preference
-    const systemPrompt = `
-      You are Rajkumar, a helpful and friendly AI assistant.
-      
-      IMPORTANT INSTRUCTION REGARDING LANGUAGE:
-      1. At the very beginning of the conversation, if the user hasn't specified a language, politely ask them which language they are comfortable with (e.g., "Hello! I am Rajkumar. Which language would you prefer to chat in? English, Hindi, or Hinglish?").
-      2. Once the user specifies a language, STRICTLY adhere to that language for all subsequent responses.
-      3. If the user writes in Hinglish, respond in Hinglish. If Hindi, respond in Hindi. If English, respond in English.
-      4. Do not switch languages unless the user explicitly requests it.
-
-      OTHER INSTRUCTIONS:
-      - If the user provides lead information (Name, Phone, Interest), use the 'save_lead_to_sheet' tool immediately.
-      - Be concise and polite.
-    `;
+    // Generate unique session ID
+    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+    
+    // Language-specific system prompt
+    const getSystemPrompt = (lang) => {
+      const prompts = {
+        'eng': `You are Rajkumar, a helpful AI assistant. Respond in English. Be friendly and concise. If user shares lead info (name/phone), use save_lead_to_sheet tool.`,
+        'hin': `आप राजकुमार हैं, एक सहायक AI असिस्टेंट। हिंदी में जवाब दें। मित्रवत और संक्षिप्त रहें। अगर यूजर लीड जानकारी (नाम/फोन) शेयर करे, तो save_lead_to_sheet टूल का उपयोग करें।`,
+        'hin-eng': `You are Rajkumar, a friendly AI assistant. Default to Hinglish (Hindi+English mix). If user prefers pure Hindi/English, switch accordingly. Save leads using save_lead_to_sheet tool when contact info is shared. Be helpful and concise.`
+      };
+      return prompts[lang] || prompts['hin-eng'];
+    };
 
     sessions.set(sessionId, {
       messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        }
+        { role: "system", content: getSystemPrompt(preferredLanguage) }
       ],
       lastAccessed: Date.now(),
-      languageDetected: null // Track detected language per session
+      language: preferredLanguage
     });
     
-    res.json({ sessionId, message: "Session initialized" });
+    console.log(`✅ Session created: ${sessionId} (lang: ${preferredLanguage})`);
+    res.json({ 
+      sessionId, 
+      message: "Session initialized successfully",
+      language: preferredLanguage
+    });
+    
   } catch (error) {
-    console.error("Session init error:", error);
-    res.status(500).json({ error: "Failed to initialize session" });
+    console.error("❌ Session init error:", error);
+    res.status(500).json({ error: "Failed to initialize session", details: error.message });
   }
 });
 
-// --- 8. Tool Handlers ---
+// ===========================================
+// 🛠️ Tool Handler Functions
+// ===========================================
 async function handleToolCall(toolCall) {
   const { name, arguments: args } = toolCall.function;
   const parsedArgs = JSON.parse(args);
@@ -263,14 +302,14 @@ async function handleToolCall(toolCall) {
       
       const options = format === 'short' 
         ? { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }
-        : { timeZone: 'Asia/Kolkata', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' };
+        : { timeZone: 'Asia/Kolkata', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
       
-      return `⏰ ${location} mein samay: ${now.toLocaleString('en-IN', options)}`;
+      return `⏰ ${location} time: ${now.toLocaleString('en-IN', options)}`;
     }
     
     case "save_lead_to_sheet": {
-      if (!isSheetsReady) {
-        return "⚠️ Google Sheets setup pending hai. Developer ko batayein.";
+      if (!isSheetsReady || !SPREADSHEET_ID) {
+        return "⚠️ Google Sheets not configured. Please contact developer.";
       }
       
       try {
@@ -287,80 +326,88 @@ async function handleToolCall(toolCall) {
           },
         });
 
-        console.log("✅ Lead saved:", { name, phone, email, interest });
-        return `✅ Lead save ho gayi! Dhanyavaad ${name} ji. Hum jald hi aapko contact karenge.`;
+        console.log(`✅ Lead saved: ${name} (${phone})`);
+        return `✅ Lead saved successfully! Thank you ${name} ji. We'll contact you soon. 🙏`;
+        
       } catch (error) {
-        console.error("❌ Sheet Error:", error.message);
-        return "❌ Lead save karne mein error aaya. Kripya baad mein try karein.";
+        console.error("❌ Sheet save error:", error.message);
+        return "❌ Error saving lead. Please try again later.";
       }
     }
     
     case "calculate": {
       try {
-        // Safe evaluation
-        const result = Function('"use strict";return (' + parsedArgs.expression + ')')();
+        // Safe math evaluation (no eval!)
+        const sanitized = parsedArgs.expression.replace(/[^0-9+\-*/().]/g, '');
+        const result = Function(`"use strict"; return (${sanitized})`)();
         return `🧮 Result: ${result}`;
       } catch (e) {
-        return "❌ Invalid expression";
+        return "❌ Invalid mathematical expression";
       }
     }
     
     default:
-      return `Unknown tool: ${name}`;
+      return `⚠️ Unknown tool: ${name}`;
   }
 }
 
-// --- 9. Main Chat Endpoint with OpenRouter ---
+// ===========================================
+// 💬 Main Chat Endpoint (POST)
+// ===========================================
 app.post('/api/chat', async (req, res) => {
   const startTime = Date.now();
   const MAX_RETRIES = 3;
   
   try {
-    // Validate input
-    const { message, sessionId, preferredLanguage } = MessageSchema.parse(req.body);
+    // Validate request body
+    const { message, sessionId, preferredLanguage = 'hin-eng' } = MessageSchema.parse(req.body);
 
     // Get or create session
     let session = sessionId ? sessions.get(sessionId) : null;
     
-    // If session doesn't exist, create one dynamically (fallback)
     if (!session) {
-      const newSessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-      const systemPrompt = `
-        You are Rajkumar, a helpful and friendly AI assistant.
-        
-        IMPORTANT INSTRUCTION REGARDING LANGUAGE:
-        1. At the very beginning of the conversation, if the user hasn't specified a language, politely ask them which language they are comfortable with.
-        2. Once the user specifies a language, STRICTLY adhere to that language for all subsequent responses.
-        3. If the user writes in Hinglish, respond in Hinglish. If Hindi, respond in Hindi. If English, respond in English.
-        
-        OTHER INSTRUCTIONS:
-        - If the user provides lead information (Name, Phone, Interest), use the 'save_lead_to_sheet' tool immediately.
-      `;
+      // Create new session if not exists
+      const newSessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+      
+      const getSystemPrompt = (lang) => {
+        const prompts = {
+          'eng': `You are Rajkumar, helpful AI. Respond in English. Save leads with save_lead_to_sheet.`,
+          'hin': `आप राजकुमार हैं, सहायक AI। हिंदी में जवाब दें। लीड सेव करने के लिए save_lead_to_sheet टूल उपयोग करें।`,
+          'hin-eng': `You are Rajkumar, friendly AI. Use Hinglish by default. Switch language if user prefers. Save leads when contact info shared.`
+        };
+        return prompts[lang] || prompts['hin-eng'];
+      };
       
       session = {
-        messages: [{ role: "system", content: systemPrompt }],
+        messages: [{ role: "system", content: getSystemPrompt(preferredLanguage) }],
         lastAccessed: Date.now(),
-        languageDetected: preferredLanguage || null
+        language: preferredLanguage
       };
       sessions.set(newSessionId, session);
-      // We will return this new ID in the response
+      // Return new session ID to frontend
+      sessionId = newSessionId;
     } else {
       session.lastAccessed = Date.now();
-      // Update language preference if sent from frontend
-      if (preferredLanguage && !session.languageDetected) {
-        session.languageDetected = preferredLanguage;
+      // Update language if changed
+      if (preferredLanguage && session.language !== preferredLanguage) {
+        session.language = preferredLanguage;
+        // Add system message for language switch
+        session.messages.push({
+          role: "system",
+          content: `User now prefers ${preferredLanguage}. Respond accordingly.`
+        });
       }
     }
 
-    // Check cache
-    const cacheKey = `${sessionId || 'default'}:${message}`;
-    const cachedResponse = responseCache.get(cacheKey);
-    if (cachedResponse && (Date.now() - cachedResponse.timestamp < CACHE_TTL)) {
+    // Check cache first (avoid duplicate API calls)
+    const cacheKey = `${sessionId}:${message}`;
+    const cached = responseCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
       session.messages.push({ role: "user", content: message });
-      session.messages.push({ role: "assistant", content: cachedResponse.reply });
-      return res.json({ 
-        reply: cachedResponse.reply, 
-        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0], // Return existing or new ID
+      session.messages.push({ role: "assistant", content: cached.reply });
+      return res.json({
+        reply: cached.reply,
+        sessionId,
         cached: true,
         responseTime: Date.now() - startTime
       });
@@ -369,14 +416,12 @@ app.post('/api/chat', async (req, res) => {
     // Add user message to history
     session.messages.push({ role: "user", content: message });
 
-    // Keep only last 20 messages to manage context window
+    // Keep context window manageable (last 20 messages)
     const conversationHistory = session.messages.slice(-20);
 
-    // Implement retry logic with exponential backoff
-    let completion;
-    let retryCount = 0;
-    let lastError;
-
+    // Retry logic for API resilience
+    let completion, retryCount = 0, lastError;
+    
     while (retryCount < MAX_RETRIES) {
       try {
         completion = await openai.chat.completions.create({
@@ -385,58 +430,60 @@ app.post('/api/chat', async (req, res) => {
           tools: tools,
           tool_choice: "auto",
           max_tokens: 1000,
-          temperature: 0.7
+          temperature: 0.7,
+          // Qwen-specific params (if supported)
+          extra_body: {
+            top_p: 0.9,
+            frequency_penalty: 0.1
+          }
         });
-        break; // Success - exit retry loop
+        break; // Success!
+        
       } catch (error) {
         lastError = error;
         
-        // Check if it's a rate limit or overload error
+        // Retry on rate limit / overload
         if (error.status === 429 || error.status === 503 || error.message?.includes('overloaded')) {
           retryCount++;
-          
           if (retryCount < MAX_RETRIES) {
-            const waitTime = Math.pow(2, retryCount) * 1000;
-            console.log(`⚠️ API overloaded. Retry ${retryCount}/${MAX_RETRIES} after ${waitTime}ms`);
+            const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
+            console.log(`⚠️ API busy. Retry ${retryCount}/${MAX_RETRIES} after ${waitTime}ms`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             continue;
           }
         } else {
-          throw error;
+          throw error; // Non-retryable error
         }
       }
     }
 
     if (retryCount >= MAX_RETRIES) {
-      throw new Error(`API unavailable after ${MAX_RETRIES} retries: ${lastError.message}`);
+      throw new Error(`API unavailable after ${MAX_RETRIES} retries: ${lastError?.message}`);
     }
 
     const responseMessage = completion.choices[0].message;
     
-    // Check if there are tool calls
-    if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-      // Handle each tool call
+    // Handle tool calls (function calling)
+    if (responseMessage.tool_calls?.length > 0) {
       const toolResponses = [];
       
       for (const toolCall of responseMessage.tool_calls) {
-        const toolResult = await handleToolCall(toolCall);
+        const result = await handleToolCall(toolCall);
         toolResponses.push({
           role: "tool",
           tool_call_id: toolCall.id,
-          content: toolResult
+          content: result
         });
       }
 
-      // Add assistant message with tool calls to history
+      // Add assistant + tool messages to history
       session.messages.push(responseMessage);
-      
-      // Add tool responses to history
       session.messages.push(...toolResponses);
 
-      // Get final response from AI with tool results
+      // Get final response with tool results
       const finalCompletion = await openai.chat.completions.create({
         model: modelName,
-        messages: [...session.messages.slice(-20)],
+        messages: session.messages.slice(-20),
         max_tokens: 1000,
         temperature: 0.7
       });
@@ -444,72 +491,98 @@ app.post('/api/chat', async (req, res) => {
       const finalText = finalCompletion.choices[0].message.content;
       session.messages.push({ role: "assistant", content: finalText });
 
-      // Cache response
+      // Cache the response
       responseCache.set(cacheKey, { reply: finalText, timestamp: Date.now() });
 
-      return res.json({ 
-        reply: finalText, 
-        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0],
+      return res.json({
+        reply: finalText,
+        sessionId,
         toolUsed: responseMessage.tool_calls[0].function.name,
         responseTime: Date.now() - startTime
       });
 
     } else {
-      // Normal conversation (no tool calls)
+      // Normal text response (no tools)
       const text = responseMessage.content;
       session.messages.push({ role: "assistant", content: text });
       
       // Cache response
       responseCache.set(cacheKey, { reply: text, timestamp: Date.now() });
       
-      return res.json({ 
-        reply: text, 
-        sessionId: sessionId || Object.fromEntries(sessions.entries()).pop()?.[0],
+      return res.json({
+        reply: text,
+        sessionId,
         responseTime: Date.now() - startTime
       });
     }
 
   } catch (error) {
+    // Zod validation errors
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
-    }
-    
-    // Handle specific OpenRouter errors
-    if (error.status === 429) {
-      return res.status(429).json({ 
-        error: "Rate limit exceeded. Please try again in a moment.",
-        retryAfter: 5
+      return res.status(400).json({ 
+        error: "Invalid request", 
+        details: error.errors.map(e => e.message) 
       });
     }
     
+    // OpenRouter API errors
     if (error.status === 401) {
-      return res.status(401).json({ error: "Invalid API key" });
+      console.error('🔐 OpenRouter Auth Error:', {
+        message: error.message,
+        keyPrefix: process.env.OPENROUTER_API_KEY?.substring(0, 10) + '...'
+      });
+      return res.status(401).json({ 
+        error: "Invalid API key",
+        hint: "Check OPENROUTER_API_KEY in environment variables"
+      });
+    }
+    
+    if (error.status === 429) {
+      return res.status(429).json({ 
+        error: "Rate limit exceeded", 
+        retryAfter: 5,
+        message: "Please wait a moment and try again"
+      });
     }
     
     if (error.status === 402) {
-      return res.status(402).json({ error: "Out of credits. Please add funds to your OpenRouter account." });
+      return res.status(402).json({ 
+        error: "Out of credits",
+        help: "Add funds at https://openrouter.ai/keys"
+      });
     }
     
     if (error.status === 404) {
-      return res.status(404).json({ error: `Model ${modelName} not found or not available` });
+      return res.status(404).json({ 
+        error: `Model "${modelName}" not found`,
+        check: "https://openrouter.ai/models?q=qwen"
+      });
     }
     
-    console.error("❌ Chat Error:", error.message);
+    // Generic server error
+    console.error("❌ Chat endpoint error:", {
+      name: error.name,
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+    
     res.status(500).json({ 
-      error: "Server error: " + error.message,
+      error: "Server error", 
+      message: process.env.NODE_ENV === 'development' ? error.message : "Something went wrong",
       responseTime: Date.now() - startTime
     });
   }
 });
 
-// --- 10. Get Recent Leads (Admin) ---
+// ===========================================
+// 📋 Admin: Get Recent Leads (GET)
+// ===========================================
 app.get('/api/leads/recent', async (req, res) => {
-  if (!isSheetsReady) {
-    return res.status(503).json({ error: "Sheets not configured" });
-  }
-
-  if (!SPREADSHEET_ID) {
-    return res.status(503).json({ error: "Google Sheet ID not configured" });
+  if (!isSheetsReady || !SPREADSHEET_ID) {
+    return res.status(503).json({ 
+      error: "Google Sheets not configured",
+      setup: "Add GOOGLE_SHEET_ID and serviceAccountKey.json"
+    });
   }
 
   try {
@@ -520,10 +593,11 @@ app.get('/api/leads/recent', async (req, res) => {
 
     const rows = response.data.values || [];
     
-    if (rows.length === 0) {
-      return res.json({ leads: [] });
+    if (rows.length <= 1) { // Only header row
+      return res.json({ leads: [], message: "No leads yet" });
     }
 
+    // Parse rows (skip header), limit to last 20, reverse for newest first
     const leads = rows.slice(1).map(row => ({
       timestamp: row[0] || new Date().toISOString(),
       name: row[1] || 'Unknown',
@@ -533,52 +607,68 @@ app.get('/api/leads/recent', async (req, res) => {
       interest: row[5] || 'General'
     })).slice(-20).reverse();
 
-    res.json({ leads });
+    res.json({ leads, count: leads.length });
+    
   } catch (error) {
     console.error("❌ Failed to fetch leads:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: "Failed to fetch leads", 
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined 
+    });
   }
 });
 
-// --- 11. Test Endpoint ---
+// ===========================================
+// 🧪 Test Endpoint (GET)
+// ===========================================
 app.get('/api/test', (req, res) => {
-  res.json({ 
+  res.json({
     success: true,
-    message: 'Server is working!',
-    timestamp: new Date().toISOString()
+    message: 'Backend is working! 🎉',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    model: modelName,
+    sheetsReady: isSheetsReady
   });
 });
 
-// --- 12. Root Route ---
+// ===========================================
+// 🏠 Root Endpoint (GET)
+// ===========================================
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'AI Chatbot API Server with OpenRouter (Qwen)',
+    service: 'Rajkumar AI Chatbot API',
     version: '2.0.0',
     model: modelName,
     endpoints: {
-      chat: 'POST /api/chat',
       health: 'GET /api/health',
       wake: 'GET /api/wake',
       keepAlive: 'POST /api/keep-alive',
       triggerWake: 'GET /api/trigger-wake?token=YOUR_TOKEN',
       test: 'GET /api/test',
-      session: 'POST /api/session/init',
+      sessionInit: 'POST /api/session/init',
+      chat: 'POST /api/chat',
       leads: 'GET /api/leads/recent'
-    }
+    },
+    docs: 'https://github.com/rajkumar/ai-chatbot'
   });
 });
 
-// --- 13. 404 Handler ---
+// ===========================================
+// ❌ 404 Handler
+// ===========================================
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Route not found',
     path: req.path,
+    method: req.method,
+    hint: `Use ${req.method === 'GET' ? 'POST' : 'GET'} for this endpoint`,
     availableRoutes: [
       'GET /',
       'GET /api/health',
-      'GET /api/wake',
+      'GET /api/wake', 
       'POST /api/keep-alive',
       'GET /api/trigger-wake?token=YOUR_TOKEN',
       'GET /api/test',
@@ -589,81 +679,98 @@ app.use((req, res) => {
   });
 });
 
-// --- 14. Error handling middleware ---
+// ===========================================
+// 🚨 Global Error Handler
+// ===========================================
 app.use((err, req, res, next) => {
-  console.error("❌ Server Error:", err.stack);
-  res.status(500).json({ 
-    error: "Something went wrong!",
-    message: err.message 
+  console.error("💥 Unhandled error:", {
+    message: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    path: req.path,
+    method: req.method
+  });
+  
+  res.status(500).json({
+    success: false,
+    error: "Internal server error",
+    message: process.env.NODE_ENV === 'development' ? err.message : "Something went wrong"
   });
 });
 
-// --- 15. Server Start ---
+// ===========================================
+// 🚀 Server Start
+// ===========================================
 const server = app.listen(PORT, () => {
-  console.log('='.repeat(60));
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log('');
-  console.log('📍 Available endpoints:');
-  console.log(`   GET   http://localhost:${PORT}/`);
-  console.log(`   GET   http://localhost:${PORT}/api/health`);
-  console.log(`   GET   http://localhost:${PORT}/api/wake`);
-  console.log(`   POST  http://localhost:${PORT}/api/keep-alive`);
-  console.log(`   GET   http://localhost:${PORT}/api/trigger-wake?token=YOUR_TOKEN`);
-  console.log(`   GET   http://localhost:${PORT}/api/test`);
-  console.log(`   POST  http://localhost:${PORT}/api/session/init`);
-  console.log(`   POST  http://localhost:${PORT}/api/chat`);
-  console.log(`   GET   http://localhost:${PORT}/api/leads/recent`);
-  console.log('');
+  console.log('\n' + '='.repeat(60));
+  console.log(`🚀 Rajkumar AI Chatbot Backend`);
+  console.log(`📍 Running on: http://localhost:${PORT}`);
   console.log(`📦 Model: ${modelName}`);
-  console.log(`📊 Active Sessions: ${sessions.size}`);
-  console.log(`📝 Sheets Ready: ${isSheetsReady ? '✅' : '❌'}`);
-  console.log(`🔋 Wake Token: ${WAKE_TOKEN.substring(0, 5)}...`);
-  console.log('='.repeat(60));
+  console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:5173'}`);
+  console.log(`📊 Sheets: ${isSheetsReady ? '✅ Ready' : '❌ Not configured'}`);
+  console.log(`🔐 Wake Token: ${WAKE_TOKEN.substring(0, 6)}...`);
+  console.log('='.repeat(60) + '\n');
+  
+  console.log('📚 Available Endpoints:');
+  console.log(`   GET    http://localhost:${PORT}/`);
+  console.log(`   GET    http://localhost:${PORT}/api/health`);
+  console.log(`   GET    http://localhost:${PORT}/api/wake`);
+  console.log(`   POST   http://localhost:${PORT}/api/keep-alive`);
+  console.log(`   GET    http://localhost:${PORT}/api/trigger-wake?token=XXX`);
+  console.log(`   GET    http://localhost:${PORT}/api/test`);
+  console.log(`   POST   http://localhost:${PORT}/api/session/init  ← Requires POST!`);
+  console.log(`   POST   http://localhost:${PORT}/api/chat         ← Requires POST!`);
+  console.log(`   GET    http://localhost:${PORT}/api/leads/recent`);
+  console.log('');
 });
 
-// --- 16. Graceful Shutdown ---
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+// ===========================================
+// 🛑 Graceful Shutdown
+// ===========================================
+const gracefulShutdown = (signal) => {
+  console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
   server.close(() => {
-    console.log('HTTP server closed');
+    console.log('✅ HTTP server closed');
+    process.exit(0);
   });
-});
+  
+  // Force shutdown after 10 seconds
+  setTimeout(() => {
+    console.error('❌ Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
 
-process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
-  server.close(() => {
-    console.log('HTTP server closed');
-  });
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('🚨 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+  console.error('💥 Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
 });
 
-// --- 17. Self-ping mechanism (optional, for keeping alive) ---
-// This will ping itself every 14 minutes to prevent sleep
-const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes
+// ===========================================
+// 💤 Self-Ping for Render Free Tier (Every 14 mins)
+// ===========================================
+const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes (Render sleeps after 15 mins)
 
 setInterval(async () => {
-  try {
-    // Only ping if there's been no activity in the last 5 minutes
-    if (Date.now() - lastActivityTime > 5 * 60 * 1000) {
-      console.log('🔄 Self-ping to keep server alive...');
-      
-      // Ping the health endpoint
-      const response = await fetch(`http://localhost:${PORT}/api/health`);
-      if (response.ok) {
-        console.log('✅ Self-ping successful');
-      }
+  // Only ping if no recent activity
+  if (Date.now() - lastActivityTime > 5 * 60 * 1000) {
+    try {
+      console.log('🔄 Self-ping to prevent sleep...');
+      const res = await fetch(`http://localhost:${PORT}/api/health`, {
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+      if (res.ok) console.log('✅ Self-ping successful');
+    } catch (err) {
+      console.log('⚠️ Self-ping failed (server may be sleeping):', err.message);
     }
-  } catch (error) {
-    console.log('⚠️ Self-ping failed (server might be sleeping):', error.message);
   }
 }, PING_INTERVAL);
 
