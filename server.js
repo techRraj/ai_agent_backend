@@ -1,24 +1,14 @@
 /**
- * 🤖 AI Chatbot Backend - Rajkumar's AI Agent [FINAL RENDER FIX]
- * ✅ Fixed: node-fetch ESM | sessionId reassignment | CORS | Production Ready
- * Author: Rajkumar Chourasiya
+ * 🤖 AI Chatbot Backend - Rajkumar's AI Agent [SENIOR DEV FIX]
+ * ✅ Direct OpenRouter API calls via axios (no openai package)
+ * ✅ Works reliably on Render | CORS | Production Ready
+ * Author: Rajkumar Chourasiya | Senior Backend Engineer
  */
 
 import 'dotenv/config';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-
-// Load node-fetch as CommonJS (works on Render)
-const fetch = require('node-fetch');
-global.fetch = fetch;
-global.Headers = fetch.Headers;
-global.Request = fetch.Request;
-global.Response = fetch.Response;
-
-// Rest of imports
 import express from 'express';
 import cors from 'cors';
-import OpenAI from 'openai';
+import axios from 'axios';
 import { google } from 'googleapis';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -69,7 +59,6 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Request logger
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.path} from ${req.ip}`);
   next();
@@ -79,7 +68,7 @@ app.use((req, res, next) => {
 // 🗄️ Response Caching
 // ===========================================
 const responseCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_TTL = 5 * 60 * 000;
 
 // ===========================================
 // 🔐 Security Variables
@@ -88,24 +77,27 @@ const WAKE_TOKEN = (process.env.WAKE_TOKEN || 'change-me-in-env').trim();
 const SELF_URL = (process.env.SELF_URL || 'http://localhost:5000').trim();
 
 // ===========================================
-// 🤖 OpenRouter Setup
+// 🤖 OpenRouter Setup - DIRECT API CALLS (No openai package)
 // ===========================================
 if (!process.env.OPENROUTER_API_KEY) {
   console.error('❌ CRITICAL: OPENROUTER_API_KEY not set!');
   process.exit(1);
 }
 
-const openai = new OpenAI({
+// Axios instance for OpenRouter
+const openRouter = axios.create({
   baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-  defaultHeaders: {
+  headers: {
+    'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
     'HTTP-Referer': process.env.APP_URL || SELF_URL,
     'X-Title': process.env.APP_NAME || 'Rajkumar AI Chatbot',
-  }
+    'Content-Type': 'application/json'
+  },
+  timeout: 30000
 });
 
 const modelName = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct';
-console.log('✅ OpenRouter initialized');
+console.log('✅ OpenRouter configured (direct API calls)');
 console.log(`📦 Model: ${modelName}`);
 
 // ===========================================
@@ -299,15 +291,12 @@ app.post('/api/session/init', (req, res) => {
 // ===========================================
 // 🛠️ Tool Handlers
 // ===========================================
-async function handleToolCall(toolCall) {
-  const { name, arguments: args } = toolCall.function;
-  const parsedArgs = JSON.parse(args);
-  
-  switch (name) {
+async function handleToolCall(toolName, toolArgs) {
+  switch (toolName) {
     case "get_current_time": {
       const now = new Date();
-      const location = parsedArgs.location || 'India';
-      const format = parsedArgs.format || 'long';
+      const location = toolArgs.location || 'India';
+      const format = toolArgs.format || 'long';
       const options = format === 'short' 
         ? { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }
         : { timeZone: 'Asia/Kolkata', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
@@ -319,7 +308,7 @@ async function handleToolCall(toolCall) {
         return "⚠️ Google Sheets not configured.";
       }
       try {
-        const leadData = LeadSchema.parse(parsedArgs);
+        const leadData = LeadSchema.parse(toolArgs);
         const { name, phone, email = 'Not provided', message: userMsg, interest = 'General' } = leadData;
         const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
@@ -340,7 +329,7 @@ async function handleToolCall(toolCall) {
     
     case "calculate": {
       try {
-        const sanitized = parsedArgs.expression.replace(/[^0-9+\-*/().]/g, '');
+        const sanitized = toolArgs.expression.replace(/[^0-9+\-*/().]/g, '');
         const result = Function(`"use strict"; return (${sanitized})`)();
         return `🧮 Result: ${result}`;
       } catch {
@@ -349,27 +338,25 @@ async function handleToolCall(toolCall) {
     }
     
     default:
-      return `⚠️ Unknown tool: ${name}`;
+      return `⚠️ Unknown tool: ${toolName}`;
   }
 }
 
 // ===========================================
-// 💬 Main Chat Endpoint - FIXED sessionId reassignment
+// 💬 Main Chat Endpoint - DIRECT OPENROUTER API CALLS
 // ===========================================
 app.post('/api/chat', async (req, res) => {
   const startTime = Date.now();
   const MAX_RETRIES = 3;
   
   try {
-    // ✅ FIXED: Parse body and allow sessionId reassignment
     const parsed = MessageSchema.parse(req.body);
     const { message, preferredLanguage = 'hin-eng' } = parsed;
-    let sessionId = parsed.sessionId;  // ← let, not const!
+    let sessionId = parsed.sessionId;
 
     let session = sessionId ? sessions.get(sessionId) : null;
     
     if (!session) {
-      // Create new session
       const newSessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
       
       const getSystemPrompt = (lang) => {
@@ -387,7 +374,7 @@ app.post('/api/chat', async (req, res) => {
         language: preferredLanguage
       };
       sessions.set(newSessionId, session);
-      sessionId = newSessionId;  // ✅ Now this works!
+      sessionId = newSessionId;
     } else {
       session.lastAccessed = Date.now();
       if (preferredLanguage && session.language !== preferredLanguage) {
@@ -407,25 +394,40 @@ app.post('/api/chat', async (req, res) => {
     session.messages.push({ role: "user", content: message });
     const conversationHistory = session.messages.slice(-20);
 
-    // Retry logic
+    // Retry logic for OpenRouter API calls
     let completion, retryCount = 0, lastError;
+    
     while (retryCount < MAX_RETRIES) {
       try {
-        completion = await openai.chat.completions.create({
+        // ✅ DIRECT API CALL - No openai package, no ESM issues
+        const response = await openRouter.post('/chat/completions', {
           model: modelName,
-          messages: conversationHistory,
-          tools: tools,
+          messages: conversationHistory.map(msg => ({
+            role: msg.role === 'tool' ? 'function' : msg.role,
+            content: msg.content,
+            name: msg.name,
+            tool_calls: msg.tool_calls,
+            tool_call_id: msg.tool_call_id
+          }).filter(v => v.content !== undefined)),
+          tools: tools.length > 0 ? tools : undefined,
           tool_choice: "auto",
           max_tokens: 1000,
           temperature: 0.7
         });
+        
+        completion = response.data;
         break;
+        
       } catch (error) {
         lastError = error;
-        if (error.status === 429 || error.status === 503 || error.message?.includes('overloaded')) {
+        const status = error.response?.status;
+        
+        if (status === 429 || status === 503 || error.message?.includes('overloaded')) {
           retryCount++;
           if (retryCount < MAX_RETRIES) {
-            await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
+            const waitTime = Math.pow(2, retryCount) * 1000;
+            console.log(`⚠️ API busy. Retry ${retryCount}/${MAX_RETRIES} after ${waitTime}ms`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
             continue;
           }
         } else {
@@ -435,54 +437,90 @@ app.post('/api/chat', async (req, res) => {
     }
 
     if (retryCount >= MAX_RETRIES) {
-      throw new Error(`API unavailable after ${MAX_RETRIES} retries`);
+      throw new Error(`API unavailable after ${MAX_RETRIES} retries: ${lastError?.message}`);
     }
 
-    const responseMessage = completion.choices[0].message;
+    const responseMessage = completion.choices?.[0]?.message;
     
+    if (!responseMessage) {
+      throw new Error('Invalid response from OpenRouter');
+    }
+    
+    // Handle tool calls (function calling)
     if (responseMessage.tool_calls?.length > 0) {
       const toolResponses = [];
+      
       for (const toolCall of responseMessage.tool_calls) {
-        const result = await handleToolCall(toolCall);
-        toolResponses.push({ role: "tool", tool_call_id: toolCall.id, content: result });
+        const toolName = toolCall.function?.name;
+        const toolArgs = JSON.parse(toolCall.function?.arguments || '{}');
+        const result = await handleToolCall(toolName, toolArgs);
+        
+        toolResponses.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: result
+        });
       }
+
       session.messages.push(responseMessage, ...toolResponses);
       
-      const finalCompletion = await openai.chat.completions.create({
+      // Get final response with tool results
+      const finalResponse = await openRouter.post('/chat/completions', {
         model: modelName,
-        messages: session.messages.slice(-20),
+        messages: session.messages.slice(-20).map(msg => ({
+          role: msg.role === 'tool' ? 'function' : msg.role,
+          content: msg.content,
+          name: msg.name,
+          tool_call_id: msg.tool_call_id
+        }).filter(v => v.content !== undefined)),
         max_tokens: 1000,
         temperature: 0.7
       });
       
-      const finalText = finalCompletion.choices[0].message.content;
+      const finalText = finalResponse.data.choices?.[0]?.message?.content;
       session.messages.push({ role: "assistant", content: finalText });
       responseCache.set(cacheKey, { reply: finalText, timestamp: Date.now() });
       
-      return res.json({ reply: finalText, sessionId, toolUsed: responseMessage.tool_calls[0].function.name, responseTime: Date.now() - startTime });
+      return res.json({ 
+        reply: finalText, 
+        sessionId, 
+        toolUsed: responseMessage.tool_calls[0].function.name, 
+        responseTime: Date.now() - startTime 
+      });
+      
     } else {
+      // Normal text response
       const text = responseMessage.content;
       session.messages.push({ role: "assistant", content: text });
       responseCache.set(cacheKey, { reply: text, timestamp: Date.now() });
-      return res.json({ reply: text, sessionId, responseTime: Date.now() - startTime });
+      
+      return res.json({ 
+        reply: text, 
+        sessionId, 
+        responseTime: Date.now() - startTime 
+      });
     }
 
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: "Invalid request", details: error.errors.map(e => e.message) });
     }
-    if (error.status === 401) {
+    
+    const status = error.response?.status;
+    
+    if (status === 401) {
       return res.status(401).json({ error: "Invalid API key", hint: "Check OPENROUTER_API_KEY" });
     }
-    if (error.status === 429) {
+    if (status === 429) {
       return res.status(429).json({ error: "Rate limit exceeded", retryAfter: 5 });
     }
-    if (error.status === 402) {
+    if (status === 402) {
       return res.status(402).json({ error: "Out of credits", help: "https://openrouter.ai/keys" });
     }
-    if (error.status === 404) {
+    if (status === 404) {
       return res.status(404).json({ error: `Model "${modelName}" not found` });
     }
+    
     console.error("❌ Chat error:", error.message);
     res.status(500).json({ error: "Server error", message: process.env.NODE_ENV === 'development' ? error.message : "Something went wrong" });
   }
@@ -595,8 +633,8 @@ setInterval(async () => {
   if (Date.now() - lastActivityTime > 5 * 60 * 1000) {
     try {
       console.log('🔄 Self-ping...');
-      const res = await fetch(`http://localhost:${PORT}/api/health`, { cache: 'no-store' });
-      if (res.ok) console.log('✅ Self-ping success');
+      const res = await axios.get(`http://localhost:${PORT}/api/health`, { timeout: 5000 });
+      if (res.status === 200) console.log('✅ Self-ping success');
     } catch (err) {
       console.log('⚠️ Self-ping failed:', err.message);
     }
