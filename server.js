@@ -56,24 +56,8 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
 
-// ✅ Minimal body parsing - avoids body-parser/iconv-lite chain
-app.use((req, res, next) => {
-  let body = '';
-  req.setEncoding('utf8');
-  req.on('data', chunk => { body += chunk; });
-  req.on('end', () => {
-    if (body) {
-      try {
-        req.body = JSON.parse(body);
-      } catch {
-        req.body = {};
-      }
-    } else {
-      req.body = {};
-    }
-    next();
-  });
-});
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.path} from ${req.ip}`);
