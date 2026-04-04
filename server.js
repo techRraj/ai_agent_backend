@@ -14,11 +14,7 @@ import { fileURLToPath } from 'url';
 import { z } from 'zod';
 
 
-import fetch from 'node-fetch';
-global.fetch = fetch;
-global.Headers = fetch.Headers;
-global.Request = fetch.Request;
-global.Response = fetch.Response;
+
 
 // 🔧 Add this at VERY TOP of server.js for better error logging
 process.on('uncaughtException', (err) => {
