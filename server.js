@@ -582,6 +582,7 @@ setInterval(async () => {
       // ✅ FIX: Removed Cache-Control header to avoid CORS preflight
       const res = await fetch(`http://localhost:${PORT}/api/health`, { cache: 'no-store' });
       if (res.ok) console.log('✅ Self-ping success');
+      console.log('success');
     } catch (err) {
       console.log('⚠️ Self-ping failed:', err.message);
     }
