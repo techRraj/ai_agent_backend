@@ -17,8 +17,10 @@ app.use(helmet({
 }));
 app.use(compression()); // Compress responses
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
+  origin: ['http://localhost:5173', 'https://ai-agent-ui-fawn.vercel.app'],
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS']
+  // No need for allowedHeaders if not sending custom headers
 }));
 app.use(express.json({ limit: '10mb' }));
 
