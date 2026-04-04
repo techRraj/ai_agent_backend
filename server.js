@@ -1,5 +1,7 @@
 /**
  * 🤖 AI Chatbot Backend - Rajkumar's AI Agent [FINAL RENDER FIX]
+ * ✅ Fixed: node-fetch ESM | sessionId reassignment | CORS | Production Ready
+ * Author: Rajkumar Chourasiya
  */
 
 import 'dotenv/config';
@@ -13,7 +15,7 @@ global.Headers = fetch.Headers;
 global.Request = fetch.Request;
 global.Response = fetch.Response;
 
-// Now import rest of packages
+// Rest of imports
 import express from 'express';
 import cors from 'cors';
 import OpenAI from 'openai';
@@ -34,7 +36,6 @@ process.on('unhandledRejection', (reason) => {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -353,19 +354,24 @@ async function handleToolCall(toolCall) {
 }
 
 // ===========================================
-// 💬 Main Chat Endpoint
+// 💬 Main Chat Endpoint - FIXED sessionId reassignment
 // ===========================================
 app.post('/api/chat', async (req, res) => {
   const startTime = Date.now();
   const MAX_RETRIES = 3;
   
   try {
-    const { message, sessionId, preferredLanguage = 'hin-eng' } = MessageSchema.parse(req.body);
+    // ✅ FIXED: Parse body and allow sessionId reassignment
+    const parsed = MessageSchema.parse(req.body);
+    const { message, preferredLanguage = 'hin-eng' } = parsed;
+    let sessionId = parsed.sessionId;  // ← let, not const!
 
     let session = sessionId ? sessions.get(sessionId) : null;
     
     if (!session) {
+      // Create new session
       const newSessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+      
       const getSystemPrompt = (lang) => {
         const prompts = {
           'eng': `You are Rajkumar, helpful AI. Respond in English.`,
@@ -374,13 +380,14 @@ app.post('/api/chat', async (req, res) => {
         };
         return prompts[lang] || prompts['hin-eng'];
       };
+      
       session = {
         messages: [{ role: "system", content: getSystemPrompt(preferredLanguage) }],
         lastAccessed: Date.now(),
         language: preferredLanguage
       };
       sessions.set(newSessionId, session);
-      sessionId = newSessionId;
+      sessionId = newSessionId;  // ✅ Now this works!
     } else {
       session.lastAccessed = Date.now();
       if (preferredLanguage && session.language !== preferredLanguage) {
@@ -389,6 +396,7 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+    // Cache check
     const cacheKey = `${sessionId}:${message}`;
     const cached = responseCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
@@ -399,6 +407,7 @@ app.post('/api/chat', async (req, res) => {
     session.messages.push({ role: "user", content: message });
     const conversationHistory = session.messages.slice(-20);
 
+    // Retry logic
     let completion, retryCount = 0, lastError;
     while (retryCount < MAX_RETRIES) {
       try {
