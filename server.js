@@ -1,19 +1,18 @@
 /**
- * 🤖 AI Chatbot Backend - Rajkumar's AI Agent [FIXED VERSION]
- * ✅ CORS Fixed | ✅ Token Auth Fixed | ✅ Production Ready
+ * 🤖 AI Chatbot Backend - Rajkumar's AI Agent
+ * ✅ Fixed for Render | CORS | Token Auth | Production Ready
  * Author: Rajkumar Chourasiya
  */
 
 import 'dotenv/config';
+import fetch from 'node-fetch';
 import express from 'express';
-import cors from 'cors';  // ✅ Uncommented - CORS enable
+import cors from 'cors';
 import OpenAI from 'openai';
 import { google } from 'googleapis';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
-import 'dotenv/config';
-import fetch from 'node-fetch';
 
 // Make fetch available globally for openai package
 global.fetch = fetch;
@@ -21,18 +20,9 @@ global.Headers = fetch.Headers;
 global.Request = fetch.Request;
 global.Response = fetch.Response;
 
-// Rest of imports...
-import express from 'express';
-import cors from 'cors';
-import OpenAI from 'openai';
-
-
-
-
-// 🔧 Add this at VERY TOP of server.js for better error logging
+// Error handlers
 process.on('uncaughtException', (err) => {
   console.error('💥 UNCAUGHT EXCEPTION:', err.message);
-  console.error('Stack:', err.stack);
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
@@ -47,41 +37,28 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ===========================================
-// 🛡️ CORS Configuration - PRODUCTION FIXED
+// 🛡️ CORS Configuration
 // ===========================================
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:3000',
-  'https://ai-agent-ui-fawn.vercel.app',  // ✅ Your Vercel frontend
-  process.env.FRONTEND_URL?.trim()  // ✅ .trim() added for safety
+  'https://ai-agent-ui-fawn.vercel.app',
+  process.env.FRONTEND_URL?.trim()
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (curl, mobile apps, server-to-server)
     if (!origin) return callback(null, true);
-    
-    // ✅ Normalize origin (remove trailing slash if any)
     const normalizedOrigin = origin.replace(/\/$/, '');
-    
     if (ALLOWED_ORIGINS.some(o => o?.replace(/\/$/, '') === normalizedOrigin)) {
       return callback(null, true);
     }
-    
     console.warn(`🚫 CORS rejected origin: ${origin}`);
     callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  // ✅ FIX: Added Cache-Control and other headers that frontend sends
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization', 
-    'Cache-Control',  // ✅ Critical fix for preflight
-    'X-Requested-With',
-    'Accept',
-    'Origin'
-  ],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
 
@@ -101,7 +78,7 @@ const responseCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 
 // ===========================================
-// 🔐 Security Variables - TRIMMED for safety
+// 🔐 Security Variables
 // ===========================================
 const WAKE_TOKEN = (process.env.WAKE_TOKEN || 'change-me-in-env').trim();
 const SELF_URL = (process.env.SELF_URL || 'http://localhost:5000').trim();
@@ -243,7 +220,6 @@ app.use((req, res, next) => {
 // ===========================================
 // 🏥 Health & Wake Endpoints
 // ===========================================
-
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -266,20 +242,14 @@ app.post('/api/keep-alive', (req, res) => {
   res.json({ status: 'alive', timestamp: new Date().toISOString() });
 });
 
-// ✅ FIXED: Token comparison with trim() for safety
 app.get('/api/trigger-wake', (req, res) => {
   const { token } = req.query;
-  
-  // ✅ Trim both sides to avoid whitespace issues
   const providedToken = (token || '').toString().trim();
   const expectedToken = WAKE_TOKEN;
   
   if (providedToken !== expectedToken) {
-    console.warn(`🔐 Unauthorized wake attempt from ${req.ip}: "${providedToken.substring(0,8)}..."`);
-    return res.status(401).json({ 
-      error: 'Unauthorized - Invalid token',
-      hint: 'Use the exact WAKE_TOKEN from environment variables'
-    });
+    console.warn(`🔐 Unauthorized wake attempt from ${req.ip}`);
+    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
   }
   
   console.log('🚀 Authorized wake trigger received');
@@ -291,7 +261,7 @@ app.get('/api/trigger-wake', (req, res) => {
 });
 
 // ===========================================
-// 🎯 Session Initialization (POST)
+// 🎯 Session Initialization
 // ===========================================
 app.post('/api/session/init', (req, res) => {
   try {
@@ -380,7 +350,7 @@ async function handleToolCall(toolCall) {
 }
 
 // ===========================================
-// 💬 Main Chat Endpoint (POST)
+// 💬 Main Chat Endpoint
 // ===========================================
 app.post('/api/chat', async (req, res) => {
   const startTime = Date.now();
@@ -416,7 +386,6 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    // Cache check
     const cacheKey = `${sessionId}:${message}`;
     const cached = responseCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
@@ -427,7 +396,6 @@ app.post('/api/chat', async (req, res) => {
     session.messages.push({ role: "user", content: message });
     const conversationHistory = session.messages.slice(-20);
 
-    // Retry logic
     let completion, retryCount = 0, lastError;
     while (retryCount < MAX_RETRIES) {
       try {
@@ -583,7 +551,7 @@ app.use((err, req, res, next) => {
 // ===========================================
 // 🚀 Server Start
 // ===========================================
-console.log('🔍 Startup Check:');
+console.log('\n🔍 Startup Check:');
 console.log('  PORT:', process.env.PORT || 5000);
 console.log('  OPENROUTER_API_KEY:', process.env.OPENROUTER_API_KEY ? '✅ Set' : '❌ MISSING');
 console.log('  OPENROUTER_MODEL:', process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct');
@@ -606,21 +574,17 @@ const gracefulShutdown = (signal) => {
 };
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('unhandledRejection', (reason) => console.error('🚨 Unhandled:', reason));
-process.on('uncaughtException', (error) => { console.error('💥 Exception:', error); gracefulShutdown('uncaughtException'); });
 
 // ===========================================
-// 💤 Self-Ping for Render (Fixed - no Cache-Control header)
+// 💤 Self-Ping for Render
 // ===========================================
 const PING_INTERVAL = 14 * 60 * 1000;
 setInterval(async () => {
   if (Date.now() - lastActivityTime > 5 * 60 * 1000) {
     try {
       console.log('🔄 Self-ping...');
-      // ✅ FIX: Removed Cache-Control header to avoid CORS preflight
       const res = await fetch(`http://localhost:${PORT}/api/health`, { cache: 'no-store' });
       if (res.ok) console.log('✅ Self-ping success');
-      console.log('success');
     } catch (err) {
       console.log('⚠️ Self-ping failed:', err.message);
     }
