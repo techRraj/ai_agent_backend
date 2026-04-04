@@ -18,11 +18,9 @@
   ],
   "author": "Rajkumar Chourasiya",
   "license": "MIT",
-  
-
-  
   "dependencies": {
     "cors": "^2.8.5",
+    "debug": "^4.3.4",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "googleapis": "^134.0.0",
@@ -31,12 +29,9 @@
     "zod": "^3.23.8"
   },
   "engines": {
-    "node": "20.x"
+    "node": "18.x"
   },
- 
-
   "devDependencies": {
     "nodemon": "^3.1.0"
   }
-  
 }
