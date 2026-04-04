@@ -13,6 +13,17 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
 
+// 🔧 Add this at VERY TOP of server.js for better error logging
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', err.message);
+  console.error('Stack:', err.stack);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('🚨 UNHANDLED REJECTION:', reason);
+  process.exit(1);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -556,6 +567,17 @@ app.use((err, req, res, next) => {
 // ===========================================
 // 🚀 Server Start
 // ===========================================
+console.log('🔍 Startup Check:');
+console.log('  PORT:', process.env.PORT || 5000);
+console.log('  OPENROUTER_API_KEY:', process.env.OPENROUTER_API_KEY ? '✅ Set' : '❌ MISSING');
+console.log('  OPENROUTER_MODEL:', process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct');
+console.log('  FRONTEND_URL:', process.env.FRONTEND_URL || 'http://localhost:5173');
+
+if (!process.env.OPENROUTER_API_KEY) {
+  console.error('❌ FATAL: OPENROUTER_API_KEY not set!');
+  process.exit(1);
+}
+
 const server = app.listen(PORT, () => {
   console.log(`\n🚀 Rajkumar AI Backend | Port: ${PORT} | Model: ${modelName}\n`);
 });
