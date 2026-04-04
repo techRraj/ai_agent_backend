@@ -5,19 +5,16 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
-    "build": "echo 'No build step needed'",
-    "postinstall": "npm install zod@3.22.4 --no-save --force 2>/dev/null || true"
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "cors": "2.8.5",
     "debug": "4.3.4",
     "dotenv": "16.4.5",
     "express": "4.19.2",
-    "googleapis": "134.0.0",
-    "iconv-lite": "0.6.3",
-    "node-fetch": "3.3.2",
-    "openai": "4.47.1",
+    "googleapis": "105.0.0",
+    "node-fetch": "2.7.0",
+    "openai": "4.20.0",
     "zod": "3.22.4"
   },
   "engines": {
