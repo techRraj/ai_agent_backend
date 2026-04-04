@@ -1,11 +1,19 @@
 /**
- * 🤖 AI Chatbot Backend - Rajkumar's AI Agent
- * ✅ Fixed for Render | CORS | Token Auth | Production Ready
- * Author: Rajkumar Chourasiya
+ * 🤖 AI Chatbot Backend - Rajkumar's AI Agent [FINAL RENDER FIX]
  */
 
 import 'dotenv/config';
-import fetch from 'node-fetch';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+// Load node-fetch as CommonJS (works on Render)
+const fetch = require('node-fetch');
+global.fetch = fetch;
+global.Headers = fetch.Headers;
+global.Request = fetch.Request;
+global.Response = fetch.Response;
+
+// Now import rest of packages
 import express from 'express';
 import cors from 'cors';
 import OpenAI from 'openai';
@@ -13,12 +21,6 @@ import { google } from 'googleapis';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
-
-// Make fetch available globally for openai package
-global.fetch = fetch;
-global.Headers = fetch.Headers;
-global.Request = fetch.Request;
-global.Response = fetch.Response;
 
 // Error handlers
 process.on('uncaughtException', (err) => {
@@ -32,6 +34,7 @@ process.on('unhandledRejection', (reason) => {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
