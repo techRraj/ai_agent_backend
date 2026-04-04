@@ -68,7 +68,7 @@ app.use((req, res, next) => {
 // 🗄️ Response Caching
 // ===========================================
 const responseCache = new Map();
-const CACHE_TTL = 5 * 60 * 000;
+const CACHE_TTL = 5 * 60 * 1000;
 
 // ===========================================
 // 🔐 Security Variables
