@@ -12,6 +12,19 @@ import { google } from 'googleapis';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
+import 'dotenv/config';
+import fetch from 'node-fetch';
+
+// Make fetch available globally for openai package
+global.fetch = fetch;
+global.Headers = fetch.Headers;
+global.Request = fetch.Request;
+global.Response = fetch.Response;
+
+// Rest of imports...
+import express from 'express';
+import cors from 'cors';
+import OpenAI from 'openai';
 
 
 
