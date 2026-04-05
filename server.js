@@ -1,6 +1,6 @@
 /**
- * 🤖 Rajkumar AI Agent Backend - Production v2.2
- * ✅ Render Fixed | ✅ CORS Secure | ✅ Better Errors | ✅ Hinglish Ready
+ * 🤖 Rajkumar AI Agent Backend - v2.3 Universal Auth
+ * ✅ File Path + Render Secret File Support | ✅ Auto-Refresh Tokens | ✅ Hinglish Ready
  * Author: Rajkumar Chourasiya | Indore, MP 🇮🇳
  */
 import 'dotenv/config';
@@ -8,13 +8,19 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import { z } from 'zod';
+import { GoogleAuth } from 'google-auth-library';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname, isAbsolute } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // 🛡️ Production-Ready Config
 const CONFIG = {
-  // CORS: Allow localhost + your Vercel URLs + env var
   allowedOrigins: [
     'http://localhost:5173',
     'http://localhost:3000', 
@@ -24,8 +30,8 @@ const CONFIG = {
   ].filter(Boolean),
   
   sheets: {
-    id: process.env.GOOGLE_SHEET_ID,
-    token: process.env.GOOGLE_SHEETS_ACCESS_TOKEN,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    credentialsSource: process.env.GOOGLE_SERVICE_ACCOUNT_KEY, // File path OR JSON string
     range: 'Sheet1!A:F'
   },
   
@@ -44,56 +50,103 @@ const CONFIG = {
   cacheTTL: 5 * 60 * 1000
 };
 
-// 🔐 Critical: Exit if API key missing
+// 🔐 Critical checks
 if (!CONFIG.openrouter.key) {
   console.error('❌ FATAL: OPENROUTER_API_KEY not set in environment variables');
   process.exit(1);
 }
 
+// 📊 Universal Credentials Loader - Works with File Path OR JSON String OR Render Secret File
+function loadGoogleCredentials() {
+  const source = CONFIG.sheets.credentialsSource;
+  
+  if (!source) {
+    console.warn('⚠️ GOOGLE_SERVICE_ACCOUNT_KEY not set - Sheets features disabled');
+    return null;
+  }
+  
+  // 🎯 Case 1: It's a file path (starts with ./ or / or ~)
+  if (source.startsWith('./') || source.startsWith('/') || source.startsWith('~')) {
+    const resolvedPath = source.startsWith('~') 
+      ? join(process.env.HOME || '', source.slice(2))
+      : isAbsolute(source) 
+        ? source 
+        : join(__dirname, source);
+    
+    if (!existsSync(resolvedPath)) {
+      console.warn(`⚠️ Service account file not found: ${resolvedPath}`);
+      return null;
+    }
+    
+    try {
+      const credentials = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
+      console.log(`✅ Loaded Google credentials from file: ${resolvedPath}`);
+      return credentials;
+    } catch (error) {
+      console.error(`❌ Failed to parse credentials file: ${error.message}`);
+      return null;
+    }
+  }
+  
+  // 🎯 Case 2: It's a JSON string (production/Render env var)
+  try {
+    const credentials = JSON.parse(source);
+    console.log('✅ Loaded Google credentials from environment variable (JSON string)');
+    return credentials;
+  } catch (parseError) {
+    // 🎯 Case 3: Render Secret File - source is the file CONTENT as string
+    // Try parsing it directly (Render mounts secret files as env var content)
+    try {
+      const credentials = JSON.parse(source.trim());
+      console.log('✅ Loaded Google credentials from Render secret file content');
+      return credentials;
+    } catch (e) {
+      console.warn('⚠️ Could not parse GOOGLE_SERVICE_ACCOUNT_KEY as JSON');
+      console.warn('💡 Expected: file path (./key.json) OR valid JSON string');
+      return null;
+    }
+  }
+}
+
+// Load credentials once at startup
+const SHEETS_CREDENTIALS = loadGoogleCredentials();
+
 // 🚀 Express Middleware
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
-    
-    // Check against allowed list (normalize trailing slashes)
     const normalized = origin.replace(/\/$/, '');
-    const isAllowed = CONFIG.allowedOrigins.some(o => 
-      o?.replace(/\/$/, '') === normalized
-    );
+    const isAllowed = CONFIG.allowedOrigins.some(o => o?.replace(/\/$/, '') === normalized);
     
     if (isAllowed) {
       console.log(`✅ CORS allowed: ${origin}`);
       return callback(null, true);
     }
-    
-    console.warn(`🚫 CORS blocked: ${origin} (allowed: ${CONFIG.allowedOrigins.join(', ')})`);
+    console.warn(`🚫 CORS blocked: ${origin}`);
     callback(new Error(`CORS policy: ${origin} not allowed`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With', 'Accept', 'Origin'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With', 'Accept', 'Origin']
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// 📝 Request Logger (Production Safe)
+// 📝 Request Logger
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${duration}ms)`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
   });
   next();
 });
 
-// 🗄️ In-Memory Cache & Sessions (Render free tier compatible)
+// 🗄️ Cache & Sessions
 const cache = new Map();
 const sessions = new Map();
 
-// 🤖 OpenRouter HTTP Client (Direct API - No SDK)
+// 🤖 OpenRouter Client
 const openRouter = axios.create({
   baseURL: 'https://openrouter.ai/api/v1',
   headers: {
@@ -103,10 +156,10 @@ const openRouter = axios.create({
     'Content-Type': 'application/json'
   },
   timeout: 30000,
-  validateStatus: status => status < 500 // Handle 4xx errors manually
+  validateStatus: status => status < 500
 });
 
-// 📝 Zod Validation Schemas
+// 📝 Zod Schemas
 const MessageSchema = z.object({
   message: z.string().min(1, "Message cannot be empty"),
   sessionId: z.string().optional(),
@@ -121,18 +174,47 @@ const LeadSchema = z.object({
   interest: z.string().optional()
 });
 
-// 📊 Google Sheets Direct REST API Helper
+// 📊 Google Sheets Auth Client Manager (Auto-Refresh Tokens)
+let sheetsAuthClient = null;
+
+async function getSheetsAuthClient() {
+  if (!SHEETS_CREDENTIALS) {
+    throw new Error('Google Sheets credentials not configured. Add GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_KEY');
+  }
+  
+  if (!sheetsAuthClient) {
+    const auth = new GoogleAuth({
+      credentials: SHEETS_CREDENTIALS,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    sheetsAuthClient = await auth.getClient();
+    console.log('✅ Google Sheets auth client initialized');
+  }
+  
+  // Auto-refresh token if expired (google-auth-library handles this)
+  await sheetsAuthClient.getAccessToken();
+  return sheetsAuthClient;
+}
+
+// 📊 Google Sheets API Helper
 const sheetsApi = {
+  isConfigured: () => !!CONFIG.sheets.spreadsheetId && !!SHEETS_CREDENTIALS,
+  
   async append(values) {
-    if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
-      throw new Error('Google Sheets not configured: Missing GOOGLE_SHEET_ID or GOOGLE_SHEETS_ACCESS_TOKEN');
+    if (!this.isConfigured()) {
+      throw new Error('Google Sheets not configured: Add GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_KEY');
     }
     
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}:append?valueInputOption=USER_ENTERED`;
+    const client = await getSheetsAuthClient();
+    const token = await client.getAccessToken();
+    
+    if (!token?.token) throw new Error('Failed to get access token');
+    
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.spreadsheetId}/values/${CONFIG.sheets.range}:append?valueInputOption=USER_ENTERED`;
     
     const { data } = await axios.post(url, { values: [values] }, {
       headers: {
-        'Authorization': `Bearer ${CONFIG.sheets.token}`,
+        'Authorization': `Bearer ${token.token}`,
         'Content-Type': 'application/json'
       },
       timeout: 10000
@@ -142,32 +224,37 @@ const sheetsApi = {
   },
   
   async getRecent(limit = 20) {
-    if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
+    if (!this.isConfigured()) {
       throw new Error('Google Sheets not configured');
     }
     
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}`;
+    const client = await getSheetsAuthClient();
+    const token = await client.getAccessToken();
+    
+    if (!token?.token) throw new Error('Failed to get access token');
+    
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.spreadsheetId}/values/${CONFIG.sheets.range}`;
     
     const { data } = await axios.get(url, {
-      headers: { 'Authorization': `Bearer ${CONFIG.sheets.token}` },
+      headers: { 'Authorization': `Bearer ${token.token}` },
       timeout: 10000
     });
     
     const rows = data.values || [];
-    if (rows.length <= 1) return []; // Only header
+    if (rows.length <= 1) return [];
     
     return rows.slice(1).slice(-limit).reverse().map(r => ({
       timestamp: r[0] || new Date().toISOString(),
       name: r[1] || 'Unknown',
       phone: r[2] || 'Not provided',
-      email: r[3] || 'Not provided', 
+      email: r[3] || 'Not provided',
       message: r[4] || 'No message',
       interest: r[5] || 'General'
     }));
   }
 };
 
-// 🛠️ Tool Definitions for Function Calling
+// 🛠️ Tool Definitions
 const tools = [
   {
     type: "function",
@@ -177,7 +264,7 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string", description: "City name" },
+          location: { type: "string" },
           format: { type: "string", enum: ["short", "long"], default: "long" }
         },
         required: ["location"]
@@ -185,7 +272,7 @@ const tools = [
     }
   },
   {
-    type: "function", 
+    type: "function",
     function: {
       name: "save_lead_to_sheet",
       description: "Save customer lead to Google Sheets",
@@ -206,552 +293,292 @@ const tools = [
     type: "function",
     function: {
       name: "calculate",
-      description: "Perform math calculations safely",
+      description: "Perform math calculations",
       parameters: {
         type: "object",
-        properties: {
-          expression: { type: "string", description: "Math expression like '2+2'" }
-        },
+        properties: { expression: { type: "string" } },
         required: ["expression"]
       }
     }
   }
 ];
 
-// 🛠️ Tool Execution Handler
+// 🛠️ Tool Handler
 async function handleTool(toolName, toolArgs) {
   switch (toolName) {
     case "get_current_time": {
       const now = new Date();
       const location = toolArgs.location || 'India';
       const format = toolArgs.format || 'long';
-      
       const options = format === 'short' 
         ? { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }
         : { timeZone: 'Asia/Kolkata', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-      
       return `⏰ ${location}: ${now.toLocaleString('en-IN', options)}`;
     }
     
     case "save_lead_to_sheet": {
-      if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
-        return "⚠️ Google Sheets not configured. Contact developer to setup env vars.";
+      if (!sheetsApi.isConfigured()) {
+        return "⚠️ Google Sheets not configured. Contact developer.";
       }
       
       try {
         const lead = LeadSchema.parse(toolArgs);
         const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
         
-        await sheetsApi.append([
-          timestamp,
-          lead.name,
-          lead.phone, 
-          lead.email || 'Not provided',
-          lead.message,
-          lead.interest || 'General'
-        ]);
-        
+        await sheetsApi.append([timestamp, lead.name, lead.phone, lead.email || 'N/A', lead.message, lead.interest || 'General']);
         console.log(`✅ Lead saved: ${lead.name} (${lead.phone})`);
-        return `✅ Lead saved successfully! Thank you ${lead.name} ji. We'll contact you soon. 🙏`;
-        
+        return `✅ Lead saved! Thank you ${lead.name} ji 🙏`;
       } catch (error) {
         console.error("❌ Lead save error:", error.message);
-        return `❌ Error saving lead: ${error.message}`;
+        return `❌ Error: ${error.message}`;
       }
     }
     
     case "calculate": {
       try {
-        // Safe math: only allow numbers and basic operators
         const sanitized = toolArgs.expression.replace(/[^0-9+\-*/().]/g, '');
-        if (!sanitized) throw new Error('Empty expression');
-        
-        const result = Function(`"use strict"; return (${sanitized})`)();
+        if (!sanitized) throw new Error('Empty');
+        const result = Function(`"use strict";return(${sanitized})`)();
         return `🧮 Result: ${result}`;
-      } catch (e) {
-        return `❌ Invalid expression: ${toolArgs.expression}`;
-      }
+      } catch { return `❌ Invalid: ${toolArgs.expression}`; }
     }
     
-    default:
-      return `⚠️ Unknown tool: ${toolName}`;
+    default: return `⚠️ Unknown tool: ${toolName}`;
   }
 }
 
-// 🌐 System Prompt by Language
-const getSystemPrompt = (lang) => {
-  const prompts = {
-    'eng': "You are Rajkumar, a helpful AI assistant. Respond in English. Be friendly and concise. If user shares contact info (name/phone), use save_lead_to_sheet tool.",
-    'hin': "आप राजकुमार हैं, एक सहायक AI असिस्टेंट। हिंदी में जवाब दें। मित्रवत और संक्षिप्त रहें। अगर यूजर लीड जानकारी (नाम/फोन) शेयर करे, तो save_lead_to_sheet टूल का उपयोग करें।",
-    'hin-eng': "You are Rajkumar, a friendly AI assistant. Default to Hinglish (Hindi+English mix). If user prefers pure Hindi/English, switch accordingly. Save leads using save_lead_to_sheet tool when contact info is shared. Be helpful and concise."
-  };
-  return prompts[lang] || prompts['hin-eng'];
-};
+// 🌐 System Prompts
+const getSystemPrompt = (lang) => ({
+  eng: "You are Rajkumar, helpful AI. Respond in English. Save leads with save_lead_to_sheet.",
+  hin: "आप राजकुमार हैं, सहायक AI। हिंदी में जवाब दें। लीड सेव करने के लिए save_lead_to_sheet टूल उपयोग करें।",
+  'hin-eng': "You are Rajkumar, friendly AI. Use Hinglish by default. Save leads when contact info shared."
+}[lang] || "You are Rajkumar AI. Be helpful.");
 
-// 🔁 Session Manager with Auto-Cleanup
+// 🔁 Session Manager
 function getOrCreateSession(sessionId, lang = 'hin-eng') {
-  // Return existing session
   if (sessionId && sessions.has(sessionId)) {
-    const session = sessions.get(sessionId);
-    session.lastAccessed = Date.now();
-    return { session, id: sessionId };
+    const s = sessions.get(sessionId);
+    s.lastAccessed = Date.now();
+    return { session: s, id: sessionId };
   }
-  
-  // Create new session
   const newId = sessionId || Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
   const session = {
     messages: [{ role: "system", content: getSystemPrompt(lang) }],
     lastAccessed: Date.now(),
     language: lang
   };
-  
   sessions.set(newId, session);
-  console.log(`🆕 Session created: ${newId} (lang: ${lang})`);
   return { session, id: newId };
 }
 
-// 🧹 Cleanup expired sessions every 5 minutes
+// 🧹 Cleanup sessions
 setInterval(() => {
   const now = Date.now();
-  let cleaned = 0;
-  
-  for (const [id, session] of sessions.entries()) {
-    if (now - session.lastAccessed > CONFIG.sessionTimeout) {
-      sessions.delete(id);
-      cleaned++;
-    }
+  for (const [id, s] of sessions.entries()) {
+    if (now - s.lastAccessed > CONFIG.sessionTimeout) sessions.delete(id);
   }
-  
-  if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} expired sessions`);
 }, 5 * 60 * 1000);
 
 // ===========================================
-// 🏥 Health & Utility Endpoints
+// 🏥 Endpoints
 // ===========================================
 
-app.get('/api/health', (_, res) => {
-  res.json({
-    status: 'ok',
-    message: 'Server is awake! 🚀',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    activeSessions: sessions.size,
-    sheetsReady: !!(CONFIG.sheets.id && CONFIG.sheets.token),
-    model: CONFIG.openrouter.model,
-    corsAllowed: CONFIG.allowedOrigins,
-    env: process.env.NODE_ENV || 'development'
-  });
-});
+app.get('/api/health', (_, res) => res.json({
+  status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime(),
+  sessions: sessions.size, sheetsReady: sheetsApi.isConfigured(), model: CONFIG.openrouter.model
+}));
 
-app.get('/api/wake', (_, res) => {
-  console.log('🔔 Wake signal received');
-  res.json({ status: 'waking', message: 'Server ready!', timestamp: new Date().toISOString() });
-});
+app.get('/api/wake', (_, res) => res.json({ status: 'waking', timestamp: new Date().toISOString() }));
+app.post('/api/keep-alive', (_, res) => res.json({ status: 'alive', timestamp: new Date().toISOString() }));
 
-app.post('/api/keep-alive', (_, res) => {
-  console.log('❤️ Keep-alive ping received');
-  res.json({ status: 'alive', timestamp: new Date().toISOString() });
-});
+app.get('/api/trigger-wake', (req, res) =>
+  req.query.token === CONFIG.wakeToken
+    ? res.json({ status: 'waking', timestamp: new Date().toISOString() })
+    : res.status(401).json({ error: 'Unauthorized' })
+);
 
-app.get('/api/trigger-wake', (req, res) => {
-  const token = (req.query.token || '').toString().trim();
-  
-  if (token !== CONFIG.wakeToken) {
-    console.warn(`🔐 Unauthorized wake attempt from ${req.ip}`);
-    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+app.get('/api/test', (_, res) => res.json({
+  success: true, message: 'Backend working! 🎉', sheetsReady: sheetsApi.isConfigured()
+}));
+
+// 🔍 Debug: Check Sheets Config
+app.get('/api/debug/sheets', async (_, res) => {
+  try {
+    const configured = sheetsApi.isConfigured();
+    if (!configured) {
+      return res.status(503).json({ 
+        configured: false, 
+        error: 'Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_KEY',
+        hint: 'Ensure env vars are set correctly'
+      });
+    }
+    
+    const client = await getSheetsAuthClient();
+    const token = await client.getAccessToken();
+    
+    res.json({
+      configured: true,
+      spreadsheetId: CONFIG.sheets.spreadsheetId,
+      credentialsLoaded: !!SHEETS_CREDENTIALS,
+      tokenValid: !!token?.token,
+      tokenExpiry: client.credentials?.expiry_date ? new Date(client.credentials.expiry_date).toISOString() : 'N/A',
+      message: '✅ Google Sheets authentication working!'
+    });
+  } catch (error) {
+    res.status(500).json({ configured: false, error: error.message });
   }
-  
-  console.log('🚀 Authorized wake trigger');
-  res.json({ status: 'waking', message: 'Wake sequence initiated', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/test', (_, res) => {
-  res.json({
-    success: true,
-    message: 'Backend working! 🎉',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    model: CONFIG.openrouter.model,
-    sheetsReady: !!(CONFIG.sheets.id && CONFIG.sheets.token),
-    corsOrigins: CONFIG.allowedOrigins
-  });
-});
-
-// 🔍 Debug Endpoint - Check Environment Config
-app.get('/api/debug/env', (_, res) => {
-  res.json({
-    NODE_ENV: process.env.NODE_ENV,
-    PORT: process.env.PORT,
-    OPENROUTER_KEY_SET: !!CONFIG.openrouter.key,
-    OPENROUTER_KEY_PREFIX: CONFIG.openrouter.key ? CONFIG.openrouter.key.substring(0, 10) + '...' : undefined,
-    MODEL: CONFIG.openrouter.model,
-    SHEETS_CONFIGURED: !!(CONFIG.sheets.id && CONFIG.sheets.token),
-    FRONTEND_URL: CONFIG.urls.frontend,
-    SELF_URL: CONFIG.urls.self,
-    ALLOWED_ORIGINS: CONFIG.allowedOrigins,
-    WAKE_TOKEN_SET: !!CONFIG.wakeToken
-  });
-});
-
-// 🔍 Debug Endpoint - Check Active Sessions
-app.get('/api/debug/sessions', (_, res) => {
-  const sessionList = Array.from(sessions.entries()).map(([id, s]) => ({
-    id,
-    language: s.language,
-    messageCount: s.messages.length,
-    lastAccessed: new Date(s.lastAccessed).toISOString(),
-    age: Math.floor((Date.now() - s.lastAccessed) / 1000) + 's'
-  }));
-  
-  res.json({
-    total: sessions.size,
-    sessions: sessionList,
-    cacheSize: cache.size
-  });
-});
+app.get('/api/debug/env', (_, res) => res.json({
+  NODE_ENV: process.env.NODE_ENV,
+  SHEETS_ID: CONFIG.sheets.spreadsheetId ? '✅ Set' : '❌ Missing',
+  SHEETS_KEY_SOURCE: CONFIG.sheets.credentialsSource?.startsWith('./') ? '📁 File Path' : '📝 JSON/String',
+  SHEETS_CREDENTIALS_LOADED: !!SHEETS_CREDENTIALS,
+  OPENROUTER_KEY_SET: !!CONFIG.openrouter.key,
+  MODEL: CONFIG.openrouter.model,
+  FRONTEND_URL: CONFIG.urls.frontend,
+  ALLOWED_ORIGINS: CONFIG.allowedOrigins
+}));
 
 // ===========================================
-// 🎯 Session Initialization (POST)
+// 🎯 Session Init
 // ===========================================
 app.post('/api/session/init', (req, res) => {
   try {
     const { preferredLanguage = 'hin-eng' } = req.body;
     const { session, id } = getOrCreateSession(null, preferredLanguage);
-    
-    res.json({ 
-      sessionId: id, 
-      message: 'Session initialized successfully',
-      language: session.language,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error("❌ Session init error:", error.message);
-    res.status(500).json({ 
-      error: "Failed to initialize session", 
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined 
-    });
-  }
+    res.json({ sessionId: id, message: 'Session initialized', language: session.language });
+  } catch (e) { res.status(500).json({ error: 'Init failed', details: e.message }); }
 });
 
 // ===========================================
-// 💬 Main Chat Endpoint (POST) - Production Ready
+// 💬 Chat Endpoint
 // ===========================================
 app.post('/api/chat', async (req, res) => {
-  const startTime = Date.now();
-  
+  const start = Date.now();
   try {
-    // 1️⃣ Validate request body
     const { message, preferredLanguage = 'hin-eng', sessionId } = MessageSchema.parse(req.body);
-    
-    // 2️⃣ Get or create session
     const { session, id: sessId } = getOrCreateSession(sessionId, preferredLanguage);
     
-    // 3️⃣ Check cache (avoid duplicate API calls)
-    const cacheKey = `${sessId}:${message}`;
-    const cached = cache.get(cacheKey);
-    
-    if (cached && (Date.now() - cached.timestamp < CONFIG.cacheTTL)) {
-      session.messages.push({ role: "user", content: message });
-      session.messages.push({ role: "assistant", content: cached.reply });
-      
-      return res.json({
-        reply: cached.reply,
-        sessionId: sessId,
-        cached: true,
-        responseTime: Date.now() - startTime
-      });
+    // Cache check
+    const key = `${sessId}:${message}`;
+    const cached = cache.get(key);
+    if (cached && Date.now() - cached.ts < CONFIG.cacheTTL) {
+      return res.json({ reply: cached.reply, sessionId: sessId, cached: true, responseTime: Date.now() - start });
     }
-    
-    // 4️⃣ Add user message to history
+
     session.messages.push({ role: "user", content: message });
-    const history = session.messages.slice(-20); // Keep context manageable
-    
-    // 5️⃣ Call OpenRouter with retry logic
-    let completion, lastError, retryCount = 0;
-    const MAX_RETRIES = 3;
-    
-    while (retryCount < MAX_RETRIES) {
+    const history = session.messages.slice(-20);
+
+    // OpenRouter call with retry
+    let completion, retries = 0;
+    while (retries < 3) {
       try {
         const response = await openRouter.post('/chat/completions', {
           model: CONFIG.openrouter.model,
-          messages: history
-            .map(m => ({
-              role: m.role === 'tool' ? 'function' : m.role,
-              content: m.content,
-              tool_call_id: m.tool_call_id
-            }))
-            .filter(v => v?.content), // ✅ Fixed: .filter() on array, not object
+          messages: history.map(m => ({
+            role: m.role === 'tool' ? 'function' : m.role,
+            content: m.content,
+            tool_call_id: m.tool_call_id
+          })).filter(v => v?.content),
           tools: tools.length > 0 ? tools : undefined,
           tool_choice: "auto",
           max_tokens: 1000,
           temperature: 0.7
         });
-        
         completion = response.data;
-        break; // Success!
-        
+        break;
       } catch (error) {
-        lastError = error;
-        const status = error.response?.status;
-        
-        // Retry on rate limit / service unavailable
-        if (status === 429 || status === 503 || error.message?.includes('overloaded')) {
-          retryCount++;
-          if (retryCount < MAX_RETRIES) {
-            const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
-            console.log(`⚠️ API busy. Retry ${retryCount}/${MAX_RETRIES} after ${waitTime}ms`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            continue;
-          }
-        }
-        throw error; // Non-retryable
+        if ([429, 503].includes(error.response?.status) && ++retries < 3) {
+          await new Promise(r => setTimeout(r, 2 ** retries * 1000));
+        } else throw error;
       }
     }
-    
-    if (!completion) {
-      throw new Error(`OpenRouter unavailable after ${MAX_RETRIES} retries: ${lastError?.message}`);
-    }
-    
-    // 6️⃣ Parse AI response (handle new OpenRouter format)
-    const choice = completion?.choices?.[0];
-    const reply = choice?.message;
-    
-    if (!reply || (!reply.content && !reply.tool_calls)) {
-      console.error('❌ Invalid OpenRouter response:', JSON.stringify(completion).slice(0, 300));
-      throw new Error('Empty or invalid AI response');
-    }
-    
-    // 7️⃣ Handle tool calls (function calling)
+
+    const reply = completion?.choices?.[0]?.message;
+    if (!reply || (!reply.content && !reply.tool_calls)) throw new Error('Empty AI response');
+
+    // Tool handling
     if (reply.tool_calls?.length > 0) {
-      console.log(`🔧 Tool calls detected: ${reply.tool_calls.map(t => t.function.name).join(', ')}`);
-      
-      // Execute all tools in parallel
-      const toolResults = await Promise.all(
-        reply.tool_calls.map(async (tc) => {
-          const toolName = tc.function?.name;
-          const toolArgs = JSON.parse(tc.function?.arguments || '{}');
-          const result = await handleTool(toolName, toolArgs);
-          
-          return {
-            role: "tool",
-            tool_call_id: tc.id,
-            content: String(result)
-          };
-        })
-      );
-      
-      // Add assistant response + tool results to history
-      session.messages.push(reply, ...toolResults);
-      
-      // Get final response after tool execution
+      const results = await Promise.all(reply.tool_calls.map(async tc => {
+        const args = JSON.parse(tc.function?.arguments || '{}');
+        const result = await handleTool(tc.function.name, args);
+        return { role: "tool", tool_call_id: tc.id, content: String(result) };
+      }));
+
+      session.messages.push(reply, ...results);
+
       const finalResponse = await openRouter.post('/chat/completions', {
         model: CONFIG.openrouter.model,
-        messages: session.messages
-          .slice(-20)
-          .map(m => ({
-            role: m.role === 'tool' ? 'function' : m.role,
-            content: m.content,
-            tool_call_id: m.tool_call_id
-          }))
-          .filter(v => v?.content), // ✅ Fixed parentheses
-        max_tokens: 1000,
-        temperature: 0.7
+        messages: session.messages.slice(-20).map(m => ({
+          role: m.role === 'tool' ? 'function' : m.role,
+          content: m.content,
+          tool_call_id: m.tool_call_id
+        })).filter(v => v?.content),
+        max_tokens: 1000, temperature: 0.7
       });
-      
-      const finalText = finalResponse.data?.choices?.[0]?.message?.content || "Hmm, let me process that...";
+
+      const finalText = finalResponse.data?.choices?.[0]?.message?.content || "Hmm...";
       session.messages.push({ role: "assistant", content: finalText });
-      
-      // Cache the final response
-      cache.set(cacheKey, { reply: finalText, timestamp: Date.now() });
-      
-      return res.json({
-        reply: finalText,
-        sessionId: sessId,
-        toolUsed: reply.tool_calls[0].function.name,
-        responseTime: Date.now() - startTime
-      });
+      cache.set(key, { reply: finalText, ts: Date.now() });
+
+      return res.json({ reply: finalText, sessionId: sessId, toolUsed: reply.tool_calls[0].function.name, responseTime: Date.now() - start });
     }
-    
-    // 8️⃣ Normal text response (no tools)
+
+    // Normal response
     const text = reply.content || "Hmm...";
     session.messages.push({ role: "assistant", content: text });
-    
-    // Cache response
-    cache.set(cacheKey, { reply: text, timestamp: Date.now() });
-    
-    return res.json({
-      reply: text,
-      sessionId: sessId,
-      responseTime: Date.now() - startTime
-    });
-    
+    cache.set(key, { reply: text, ts: Date.now() });
+
+    res.json({ reply: text, sessionId: sessId, responseTime: Date.now() - start });
+
   } catch (error) {
-    // 🔥 Production-safe error logging
-    const errorInfo = {
-      name: error.name,
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      path: req.path,
-      method: req.method,
-      ip: req.ip
-    };
+    console.error('💥 Chat error:', { name: error.name, message: error.message, status: error.response?.status });
     
-    console.error('💥 Chat endpoint error:', JSON.stringify(errorInfo, null, 2));
-    
-    // User-friendly error responses
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ 
-        error: "Invalid request", 
-        details: error.errors.map(e => e.message) 
-      });
-    }
-    
+    if (error.name === 'ZodError') return res.status(400).json({ error: 'Invalid request', details: error.errors.map(e => e.message) });
     const status = error.response?.status;
-    
-    if (status === 401) {
-      return res.status(401).json({ 
-        error: "Invalid OpenRouter API key",
-        hint: "Check OPENROUTER_API_KEY in environment variables"
-      });
-    }
-    
-    if (status === 402) {
-      return res.status(402).json({ 
-        error: "Out of credits",
-        help: "Add funds at https://openrouter.ai/keys"
-      });
-    }
-    
-    if (status === 404) {
-      return res.status(404).json({ 
-        error: `Model "${CONFIG.openrouter.model}" not found`,
-        check: "https://openrouter.ai/models?q=qwen"
-      });
-    }
-    
-    if (status === 429) {
-      return res.status(429).json({ 
-        error: "Rate limit exceeded", 
-        retryAfter: 5,
-        message: "Please wait a moment and try again"
-      });
-    }
-    
-    // Generic 500 error
-    return res.status(500).json({ 
-      error: "Server error", 
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-      debug: process.env.NODE_ENV === 'development' ? { 
-        stack: error.stack,
-        config: error.config 
-      } : undefined,
-      responseTime: Date.now() - startTime
-    });
+    if (status === 401) return res.status(401).json({ error: 'Invalid API key' });
+    if (status === 402) return res.status(402).json({ error: 'Out of credits' });
+    if (status === 404) return res.status(404).json({ error: 'Model not found' });
+    if (status === 429) return res.status(429).json({ error: 'Rate limited', retryAfter: 5 });
+
+    res.status(500).json({ error: 'Server error', message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong' });
   }
 });
 
 // ===========================================
-// 📋 Admin: Get Recent Leads (GET)
+// 📋 Leads Endpoint
 // ===========================================
 app.get('/api/leads/recent', async (_, res) => {
-  if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
-    return res.status(503).json({ 
-      error: "Google Sheets not configured",
-      setup: "Add GOOGLE_SHEET_ID and GOOGLE_SHEETS_ACCESS_TOKEN to environment variables",
-      docs: "https://github.com/rajkumar/ai-agent#google-sheets-setup"
-    });
+  if (!sheetsApi.isConfigured()) {
+    return res.status(503).json({ error: 'Sheets not configured', setup: 'Add GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_KEY' });
   }
-
   try {
     const leads = await sheetsApi.getRecent(20);
-    res.json({ leads, count: leads.length, timestamp: new Date().toISOString() });
-    
-  } catch (error) {
-    console.error("❌ Failed to fetch leads:", error.message);
-    res.status(500).json({ 
-      error: "Failed to fetch leads", 
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined 
-    });
+    res.json({ leads, count: leads.length });
+  } catch (e) {
+    console.error('❌ Leads error:', e.message);
+    res.status(500).json({ error: 'Fetch failed', details: process.env.NODE_ENV === 'development' ? e.message : undefined });
   }
 });
 
 // ===========================================
-// 🏠 Root Endpoint
+// 🏠 Root & 404
 // ===========================================
-app.get('/', (_, res) => {
-  res.json({
-    success: true,
-    service: 'Rajkumar AI Agent API',
-    version: '2.2.0',
-    author: 'Rajkumar Chourasiya',
-    location: 'Indore, MP, India 🇮🇳',
-    model: CONFIG.openrouter.model,
-    endpoints: {
-      health: 'GET /api/health',
-      wake: 'GET /api/wake',
-      keepAlive: 'POST /api/keep-alive',
-      triggerWake: 'GET /api/trigger-wake?token=YOUR_TOKEN',
-      test: 'GET /api/test',
-      debug: {
-        env: 'GET /api/debug/env',
-        sessions: 'GET /api/debug/sessions'
-      },
-      sessionInit: 'POST /api/session/init',
-      chat: 'POST /api/chat',
-      leads: 'GET /api/leads/recent'
-    },
-    docs: 'https://github.com/rajkumar/ai-agent',
-    status: 'Running 🚀'
-  });
-});
+app.get('/', (_, res) => res.json({
+  service: 'Rajkumar AI Agent API', version: '2.3', model: CONFIG.openrouter.model,
+  endpoints: { health: 'GET /api/health', chat: 'POST /api/chat', init: 'POST /api/session/init', leads: 'GET /api/leads/recent', debug: 'GET /api/debug/sheets' }
+}));
 
-// ===========================================
-// ❌ 404 Handler
-// ===========================================
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Route not found',
-    path: req.path,
-    method: req.method,
-    hint: `Use ${req.method === 'GET' ? 'POST' : 'GET'} for this endpoint`,
-    availableRoutes: [
-      'GET /',
-      'GET /api/health',
-      'GET /api/wake', 
-      'POST /api/keep-alive',
-      'GET /api/trigger-wake?token=YOUR_TOKEN',
-      'GET /api/test',
-      'GET /api/debug/env',
-      'GET /api/debug/sessions',
-      'POST /api/session/init',
-      'POST /api/chat',
-      'GET /api/leads/recent'
-    ]
-  });
-});
+app.use((req, res) => res.status(404).json({
+  error: 'Route not found', path: req.path, method: req.method,
+  hint: `Try ${req.method === 'GET' ? 'POST' : 'GET'} for ${req.path}`,
+  available: ['GET /', 'GET /api/health', 'POST /api/keep-alive', 'POST /api/session/init', 'POST /api/chat', 'GET /api/leads/recent', 'GET /api/debug/sheets']
+}));
 
-// ===========================================
-// 🛑 Global Error Handler
-// ===========================================
-app.use((err, req, res, next) => {
-  console.error("💥 Unhandled error:", {
-    message: err.message,
-    name: err.name,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-    path: req.path,
-    method: req.method,
-    ip: req.ip
-  });
-  
-  res.status(500).json({
-    success: false,
-    error: "Internal server error",
-    message: process.env.NODE_ENV === 'development' ? err.message : "Something went wrong",
-    debug: process.env.NODE_ENV === 'development' ? { name: err.name, stack: err.stack } : undefined
-  });
+app.use((err, req, res, _) => {
+  console.error('💥 Global error:', err.message);
+  res.status(500).json({ error: 'Internal error', message: process.env.NODE_ENV === 'development' ? err.message : 'Server issue' });
 });
 
 // ===========================================
@@ -759,89 +586,24 @@ app.use((err, req, res, next) => {
 // ===========================================
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n' + '='.repeat(70));
-  console.log(`🚀 Rajkumar AI Agent Backend v2.2`);
-  console.log(`📍 Server: http://localhost:${PORT} | ${CONFIG.urls.self}`);
-  console.log(`🌐 Frontend: ${CONFIG.urls.frontend || 'Not set'}`);
+  console.log(`🚀 Rajkumar AI Agent Backend v2.3`);
+  console.log(`📍 Server: ${CONFIG.urls.self}`);
   console.log(`📦 Model: ${CONFIG.openrouter.model}`);
-  console.log(`🔐 API Key: ${CONFIG.openrouter.key ? '✅ Set' : '❌ Missing!'}`);
-  console.log(`📊 Sheets: ${CONFIG.sheets.id && CONFIG.sheets.token ? '✅ Ready' : '❌ Not configured'}`);
+  console.log(`🔐 OpenRouter: ${CONFIG.openrouter.key ? '✅' : '❌'}`);
+  console.log(`📊 Sheets: ${sheetsApi.isConfigured() ? '✅ Ready' : '❌ Not configured'}`);
   console.log(`🔗 CORS: ${CONFIG.allowedOrigins.join(', ')}`);
-  console.log(`🌍 Env: ${process.env.NODE_ENV || 'development'}`);
   console.log('='.repeat(70) + '\n');
-  
-  console.log('📚 Available Endpoints:');
-  console.log(`   GET    ${CONFIG.urls.self}/`);
-  console.log(`   GET    ${CONFIG.urls.self}/api/health`);
-  console.log(`   GET    ${CONFIG.urls.self}/api/debug/env  ← Check env vars!`);
-  console.log(`   POST   ${CONFIG.urls.self}/api/chat       ← Main chat endpoint`);
-  console.log(`   POST   ${CONFIG.urls.self}/api/session/init`);
-  console.log(`   GET    ${CONFIG.urls.self}/api/leads/recent`);
-  console.log('');
 });
 
-// ===========================================
-// 🔄 Self-Ping for Render Free Tier
-// ===========================================
-const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes (Render sleeps after 15)
-
+// 🔄 Self-ping for Render
 setInterval(async () => {
-  // Only ping if no recent activity
-  const recentActivity = Array.from(sessions.values()).some(s => 
-    Date.now() - s.lastAccessed < 5 * 60 * 1000
-  );
-  
-  if (!recentActivity) {
-    try {
-      console.log('🔄 Self-ping to prevent Render sleep...');
-      
-      // Use public URL for self-ping (not localhost!)
-      const pingUrl = `${CONFIG.urls.self.replace('localhost', '127.0.0.1')}/api/health`;
-      
-      const response = await axios.get(pingUrl, { 
-        timeout: 5000,
-        headers: { 'Cache-Control': 'no-cache' },
-        validateStatus: () => true // Don't throw on error
-      });
-      
-      if (response.status === 200) {
-        console.log('✅ Self-ping successful');
-      } else {
-        console.warn(`⚠️ Self-ping returned ${response.status}`);
-      }
-    } catch (err) {
-      console.log('⚠️ Self-ping failed:', err.message);
-    }
-  }
-}, PING_INTERVAL);
+  try {
+    await axios.get(`${CONFIG.urls.self.replace('localhost', '127.0.0.1')}/api/health`, { timeout: 5000 });
+  } catch (e) { console.log('⚠️ Self-ping skipped'); }
+}, 14 * 60 * 1000);
 
-// ===========================================
 // 🛑 Graceful Shutdown
-// ===========================================
-const gracefulShutdown = (signal) => {
-  console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
-  
-  server.close(() => {
-    console.log('✅ HTTP server closed');
-    console.log(`🧹 Cleaned ${sessions.size} sessions, ${cache.size} cache entries`);
-    process.exit(0);
-  });
-  
-  // Force shutdown after 10 seconds
-  setTimeout(() => {
-    console.error('❌ Could not close connections in time, forcing shutdown');
-    process.exit(1);
-  }, 10000);
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION:', err.message);
-  process.exit(1);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('🚨 UNHANDLED REJECTION:', reason);
-  process.exit(1);
-});
+process.on('SIGTERM', () => { console.log('🛑 SIGTERM'); server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { console.log('🛑 SIGINT'); server.close(() => process.exit(0)); });
 
 export default app;
