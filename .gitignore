@@ -12,8 +12,6 @@ serviceAccountKey.json
 logs/
 *.log
 
-# Node modules
-node_modules/
 
 # OS files
 .DS_Store
