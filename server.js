@@ -14,9 +14,31 @@ const PORT = process.env.PORT || 5000;
 
 // 🛡️ Config & Constants
 const CONFIG = {
-  origins: ['http://localhost:5173', 'http://localhost:3000', 'https://ai-agent-ui-fawn.vercel.app', process.env.FRONTEND_URL].filter(Boolean),
-  sheets: { id: process.env.GOOGLE_SHEET_ID, token: process.env.GOOGLE_SHEETS_ACCESS_TOKEN, range: 'Sheet1!A:F' },
-  openrouter: { key: process.env.OPENROUTER_API_KEY, model: process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct' },
+  // CORS: Allow localhost + your Vercel URLs + env var
+  allowedOrigins: [
+    'http://localhost:5173',
+    'http://localhost:3000', 
+    'https://ai-agent-ui-fawn.vercel.app',
+    'https://ai-agent-ui-fawn-git-main.vercel.app',
+    process.env.FRONTEND_URL
+  ].filter(Boolean),
+  
+  sheets: {
+    id: process.env.GOOGLE_SHEET_ID,
+    token: process.env.GOOGLE_SHEETS_ACCESS_TOKEN,
+    range: 'Sheet1!A:F'
+  },
+  
+  openrouter: {
+    key: process.env.OPENROUTER_API_KEY,
+    model: process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct'
+  },
+  
+  urls: {
+    self: process.env.SELF_URL || process.env.APP_URL || `http://localhost:${PORT}`,
+    frontend: process.env.FRONTEND_URL
+  },
+  
   wakeToken: process.env.WAKE_TOKEN || 'change-me',
   sessionTimeout: 30 * 60 * 1000,
   cacheTTL: 5 * 60 * 1000
@@ -25,113 +47,269 @@ const CONFIG = {
 if (!CONFIG.openrouter.key) { console.error('❌ OPENROUTER_API_KEY missing'); process.exit(1); }
 
 // 🚀 Express Setup
-app.use(cors({ origin: CONFIG.origins, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Check against allowed list (normalize trailing slashes)
+    const normalized = origin.replace(/\/$/, '');
+    const isAllowed = CONFIG.allowedOrigins.some(o => 
+      o?.replace(/\/$/, '') === normalized
+    );
+    
+    if (isAllowed) {
+      console.log(`✅ CORS allowed: ${origin}`);
+      return callback(null, true);
+    }
+    
+    console.warn(`🚫 CORS blocked: ${origin} (allowed: ${CONFIG.allowedOrigins.join(', ')})`);
+    callback(new Error(`CORS policy: ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+}));
+
 app.use(express.json({ limit: '10mb' }));
-app.use((req, res, next) => { console.log(`📥 ${req.method} ${req.path}`); next(); });
+app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
 
 // 🗄️ Simple Cache & Sessions
-const cache = new Map(), sessions = new Map();
+const cache = new Map();
+const sessions = new Map();
 
 // 🤖 OpenRouter Client
 const openRouter = axios.create({
   baseURL: 'https://openrouter.ai/api/v1',
   headers: {
     'Authorization': `Bearer ${CONFIG.openrouter.key}`,
-    'HTTP-Referer': process.env.APP_URL || 'http://localhost:5000',
+    'HTTP-Referer': CONFIG.urls.self,
     'X-Title': 'Rajkumar AI Agent',
     'Content-Type': 'application/json'
   },
-  timeout: 30000
+  timeout: 30000,
+  validateStatus: status => status < 500 // Handle 4xx errors manually
 });
 
 // 📝 Zod Schemas
 const MessageSchema = z.object({
-  message: z.string().min(1),
+  message: z.string().min(1, "Message cannot be empty"),
   sessionId: z.string().optional(),
   preferredLanguage: z.enum(['eng', 'hin', 'hin-eng']).optional().default('hin-eng')
 });
+
 const LeadSchema = z.object({
-  name: z.string().min(1), phone: z.string().min(10),
-  email: z.string().email().optional(), message: z.string().min(1), interest: z.string().optional()
+  name: z.string().min(1),
+  phone: z.string().min(10),
+  email: z.string().email().optional().or(z.literal('')).optional(),
+  message: z.string().min(1),
+  interest: z.string().optional()
 });
 
 // 📊 Google Sheets Helpers (Direct REST API)
 const sheetsApi = {
   async append(values) {
-    if (!CONFIG.sheets.id || !CONFIG.sheets.token) throw new Error('Sheets not configured');
-    return axios.post(
-      `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}:append?valueInputOption=USER_ENTERED`,
-      { values: [values] },
-      { headers: { 'Authorization': `Bearer ${CONFIG.sheets.token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
-    );
+    if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
+      throw new Error('Google Sheets not configured: Missing GOOGLE_SHEET_ID or GOOGLE_SHEETS_ACCESS_TOKEN');
+    }
+    
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}:append?valueInputOption=USER_ENTERED`;
+    
+    const { data } = await axios.post(url, { values: [values] }, {
+      headers: {
+        'Authorization': `Bearer ${CONFIG.sheets.token}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+    
+    return data;
   },
+  
   async getRecent(limit = 20) {
-    if (!CONFIG.sheets.id || !CONFIG.sheets.token) throw new Error('Sheets not configured');
-    const { data } = await axios.get(
-      `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}`,
-      { headers: { 'Authorization': `Bearer ${CONFIG.sheets.token}` }, timeout: 10000 }
-    );
+    if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
+      throw new Error('Google Sheets not configured');
+    }
+    
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.sheets.id}/values/${CONFIG.sheets.range}`;
+    
+    const { data } = await axios.get(url, {
+      headers: { 'Authorization': `Bearer ${CONFIG.sheets.token}` },
+      timeout: 10000
+    });
+    
     const rows = data.values || [];
+    if (rows.length <= 1) return []; // Only header
+    
     return rows.slice(1).slice(-limit).reverse().map(r => ({
-      timestamp: r[0], name: r[1] || 'Unknown', phone: r[2], email: r[3], message: r[4], interest: r[5]
+      timestamp: r[0] || new Date().toISOString(),
+      name: r[1] || 'Unknown',
+      phone: r[2] || 'Not provided',
+      email: r[3] || 'Not provided', 
+      message: r[4] || 'No message',
+      interest: r[5] || 'General'
     }));
   }
 };
 
 // 🛠️ Tool Handlers
 const tools = [
-  { type: "function", function: { name: "get_current_time", description: "Get current time", parameters: { type: "object", properties: { location: { type: "string" }, format: { type: "string", enum: ["short", "long"] } }, required: ["location"] } } },
-  { type: "function", function: { name: "save_lead_to_sheet", description: "Save lead to Google Sheets", parameters: { type: "object", properties: { name: { type: "string" }, phone: { type: "string" }, email: { type: "string" }, message: { type: "string" }, interest: { type: "string" } }, required: ["name", "phone", "message"] } } },
-  { type: "function", function: { name: "calculate", description: "Math calculation", parameters: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] } } }
+  {
+    type: "function",
+    function: {
+      name: "get_current_time",
+      description: "Get current date/time for a location",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "City name" },
+          format: { type: "string", enum: ["short", "long"], default: "long" }
+        },
+        required: ["location"]
+      }
+    }
+  },
+  {
+    type: "function", 
+    function: {
+      name: "save_lead_to_sheet",
+      description: "Save customer lead to Google Sheets",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          phone: { type: "string" },
+          email: { type: "string" },
+          message: { type: "string" },
+          interest: { type: "string" }
+        },
+        required: ["name", "phone", "message"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "calculate",
+      description: "Perform math calculations safely",
+      parameters: {
+        type: "object",
+        properties: {
+          expression: { type: "string", description: "Math expression like '2+2'" }
+        },
+        required: ["expression"]
+      }
+    }
+  }
 ];
 
-async function handleTool(name, args) {
-  switch (name) {
-    case "get_current_time":
-      return `⏰ ${args.location || 'India'}: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', ...(args.format === 'short' ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })}`;
-    case "save_lead_to_sheet":
+// 🛠️ Tool Execution Handler
+async function handleTool(toolName, toolArgs) {
+  switch (toolName) {
+    case "get_current_time": {
+      const now = new Date();
+      const location = toolArgs.location || 'India';
+      const format = toolArgs.format || 'long';
+      
+      const options = format === 'short' 
+        ? { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }
+        : { timeZone: 'Asia/Kolkata', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+      
+      return `⏰ ${location}: ${now.toLocaleString('en-IN', options)}`;
+    }
+    
+    case "save_lead_to_sheet": {
+      if (!CONFIG.sheets.id || !CONFIG.sheets.token) {
+        return "⚠️ Google Sheets not configured. Contact developer to setup env vars.";
+      }
+      
       try {
-        const { name, phone, email = 'N/A', message: msg, interest = 'General' } = LeadSchema.parse(args);
-        await sheetsApi.append([new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }), name, phone, email, msg, interest]);
-        return `✅ Lead saved! Thank you ${name} ji 🙏`;
-      } catch (e) { return `❌ Save failed: ${e.message}`; }
-    case "calculate":
+        const lead = LeadSchema.parse(toolArgs);
+        const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+        
+        await sheetsApi.append([
+          timestamp,
+          lead.name,
+          lead.phone, 
+          lead.email || 'Not provided',
+          lead.message,
+          lead.interest || 'General'
+        ]);
+        
+        console.log(`✅ Lead saved: ${lead.name} (${lead.phone})`);
+        return `✅ Lead saved successfully! Thank you ${lead.name} ji. We'll contact you soon. 🙏`;
+        
+      } catch (error) {
+        console.error("❌ Lead save error:", error.message);
+        return `❌ Error saving lead: ${error.message}`;
+      }
+    }
+    
+    case "calculate": {
       try {
-        const safe = args.expression.replace(/[^0-9+\-*/().]/g, '');
-        return `🧮 Result: ${Function(`"use strict";return(${safe})`)()}`;
-      } catch { return "❌ Invalid expression"; }
-    default: return `⚠️ Unknown tool: ${name}`;
+        // Safe math: only allow numbers and basic operators
+        const sanitized = toolArgs.expression.replace(/[^0-9+\-*/().]/g, '');
+        if (!sanitized) throw new Error('Empty expression');
+        
+        const result = Function(`"use strict"; return (${sanitized})`)();
+        return `🧮 Result: ${result}`;
+      } catch (e) {
+        return `❌ Invalid expression: ${toolArgs.expression}`;
+      }
+    }
+    
+    default:
+      return `⚠️ Unknown tool: ${toolName}`;
   }
 }
 
 // 🌐 System Prompt Generator
 const getPrompt = (lang) => ({
-  eng: "You are Rajkumar, helpful AI. Respond in English. Save leads with save_lead_to_sheet.",
-  hin: "आप राजकुमार हैं, सहायक AI। हिंदी में जवाब दें। लीड सेव करने के लिए save_lead_to_sheet टूल उपयोग करें।",
-  'hin-eng': "You are Rajkumar, friendly AI. Use Hinglish by default. Switch if user prefers. Save leads when contact info shared."
-}[lang] || "You are Rajkumar AI. Be helpful and concise.");
+  eng: "You are Lead Agent, helpful AI. Respond in English. Save leads with save_lead_to_sheet.",
+  hin: "आप Lead agent हैं, सहायक AI। हिंदी में जवाब दें। लीड सेव करने के लिए save_lead_to_sheet टूल उपयोग करें।",
+  'hin-eng': "You are Lead Agent, friendly AI. Use Hinglish by default. Switch if user prefers. Save leads when contact info shared."
+}[lang] || "You are Lead agent AI. Be helpful and concise.");
 
 // 🔁 Session Manager
 function getOrCreateSession(sessionId, lang = 'hin-eng') {
-  if (sessionId && sessions.has(sessionId)) {
-    const s = sessions.get(sessionId);
-    s.lastAccessed = Date.now();
-    return s;
+ if (sessionId && sessions.has(sessionId)) {
+    const session = sessions.get(sessionId);
+    session.lastAccessed = Date.now();
+    return { session, id: sessionId };
   }
   const newId = sessionId || Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
   const session = {
-    messages: [{ role: "system", content: getPrompt(lang) }],
-    lastAccessed: Date.now(), language: lang
+    messages: [{ role: "system", content: getSystemPrompt(lang) }],
+    lastAccessed: Date.now(),
+    language: lang
   };
-  sessions.set(newId, session);
+ sessions.set(newId, session);
+  console.log(`🆕 Session created: ${newId} (lang: ${lang})`);
   return { session, id: newId };
 }
 
 // Cleanup old sessions
 setInterval(() => {
   const now = Date.now();
-  for (const [id, s] of sessions.entries())
-    if (now - s.lastAccessed > CONFIG.sessionTimeout) sessions.delete(id);
+  let cleaned = 0;
+  
+  for (const [id, session] of sessions.entries()) {
+    if (now - session.lastAccessed > CONFIG.sessionTimeout) {
+      sessions.delete(id);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} expired sessions`);
 }, 5 * 60 * 1000);
 
 // ===========================================
